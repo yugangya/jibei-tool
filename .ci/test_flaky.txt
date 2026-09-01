@@ -1,0 +1,6 @@
+# flaky
+test_gui_filedownloader
+test_provider_wcsprovider
+PyQgsWFSProviderGUI
+# See https://github.com/qgis/QGIS/issues/48927
+test_core_tiledownloadmanager

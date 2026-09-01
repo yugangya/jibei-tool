@@ -1,0 +1,69 @@
+name: Compare vcpkg install changes
+description: Compares vcpkg install outputs between the base and head refs on pull requests and generates a report.
+
+inputs:
+  vcpkg-manifest-dir:
+    description: 'Directory containing the vcpkg.json manifest'
+    required: true
+    default: '.'
+    type: string
+  triplet:
+    description: 'Triplet to use for vcpkg installation'
+    required: true
+    default: 'x64-linux'
+    type: string
+  features:
+    description: 'Comma separated list of features'
+    required: false
+    default: ''
+    type: string
+
+outputs:
+  report:
+    description: 'The report of added and removed packages after vcpkg installation comparison'
+    value: ${{ steps.compare.outputs.report }}
+
+runs:
+  using: "composite"
+  steps:
+    # Run vcpkg install --dry-run on the head ref
+    - name: Run vcpkg install (HEAD)
+      shell: bash
+      run: |
+        vcpkg install --dry-run --triplet ${{ inputs.triplet }} --x-manifest-root=${{ inputs.vcpkg-manifest-dir }} $(awk -v FS=',' '{for(i=1; i<=NF; i++) printf "--x-feature=%s ", $i}' <<< "${{ inputs.features }}") --allow-unsupported > /tmp/vcpkg-head-output.txt
+
+    # Run vcpkg install --dry-run on the base ref
+    - name: Run vcpkg install (BASE)
+      shell: bash
+      run: |
+        base_sha='${{ github.event.pull_request.base.sha }}'
+        base_out=/tmp/vcpkg-base-output.txt
+        # Ensure an empty base output always exists so the comparison can run.
+        : > "${base_out}"
+        # Shallow checkouts (and stale/conflicted PR merge refs) may not contain
+        # the base commit. Fetch just that commit explicitly before using it.
+        git fetch --no-tags --depth=1 origin "${base_sha}" 2>/dev/null || true
+        if git worktree add .base-ref "${base_sha}" 2>/dev/null; then
+          vcpkg install --dry-run --triplet ${{ inputs.triplet }} --x-manifest-root=.base-ref/${{ inputs.vcpkg-manifest-dir }} $(awk -v FS=',' '{for(i=1; i<=NF; i++) printf "--x-feature=%s ", $i}' <<< "${{ inputs.features }}") --allow-unsupported > "${base_out}"
+        else
+          echo "::warning title=Vcpkg update report::Base ref ${base_sha} is unavailable (shallow or conflicted history); reporting the HEAD install list without a base comparison."
+        fi
+
+
+    # Compare the outputs and generate a report
+    - name: Compare vcpkg outputs
+      shell: bash
+      id: compare
+      run: |
+        python3 ${GITHUB_ACTION_PATH}/vcpkg-diff.py > /tmp/vcpkg-report.txt
+        # If the base install list could not be produced, surface that in the
+        # report instead of silently presenting the full HEAD list as a diff.
+        if [ ! -s /tmp/vcpkg-base-output.txt ]; then
+          printf '> ⚠️ Base ref unavailable — showing the full HEAD install list (no diff).\n\n%s' "$(cat /tmp/vcpkg-report.txt)" > /tmp/vcpkg-report.txt
+        fi
+        cat /tmp/vcpkg-report.txt
+        {
+          echo 'report<<EOF'
+          cat /tmp/vcpkg-report.txt
+          echo EOF
+        } >> "$GITHUB_OUTPUT"

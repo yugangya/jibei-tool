@@ -1,0 +1,59 @@
+/***************************************************************************
+                          qgslightsource.cpp
+                          -----------------
+    begin                : April 2022
+    copyright            : (C) 2022 by Nyall Dawson
+    email                : nyall dot dawson at gmail dot com
+***************************************************************************/
+
+
+/***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#include "qgslightsource.h"
+
+#include "qgsdirectionallightsettings.h"
+#include "qgspointlightsettings.h"
+#include "qgssunlightsettings.h"
+
+#include <QString>
+#include <QUuid>
+
+using namespace Qt::StringLiterals;
+
+QgsLightSource::QgsLightSource()
+  : mId( QUuid::createUuid().toString( QUuid::StringFormat::WithoutBraces ) )
+{}
+
+QgsLightSource::~QgsLightSource() = default;
+
+void QgsLightSource::resolveReferences( const QgsProject & )
+{}
+
+QgsLightSource *QgsLightSource::createFromXml( const QDomElement &element, const QgsReadWriteContext &context )
+{
+  std::unique_ptr<QgsLightSource> res;
+  if ( element.nodeName() == "point-light"_L1 )
+  {
+    res = std::make_unique<QgsPointLightSettings>();
+  }
+  else if ( element.nodeName() == "directional-light"_L1 )
+  {
+    res = std::make_unique<QgsDirectionalLightSettings>();
+  }
+  else if ( element.nodeName() == "sun-light"_L1 )
+  {
+    res = std::make_unique<QgsSunLightSettings>();
+  }
+
+  if ( res )
+    res->readXml( element, context );
+
+  return res.release();
+}

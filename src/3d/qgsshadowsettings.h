@@ -1,0 +1,151 @@
+/***************************************************************************
+  qgsshadowsettings.h
+  --------------------------------------
+  Date                 : September 2020
+  Copyright            : (C) 2020 by Belgacem Nedjima
+  Email                : gb uderscore nedjima at esi dot dz
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#ifndef QGSSHADOWSETTINGS_H
+#define QGSSHADOWSETTINGS_H
+
+#include "qgis.h"
+#include "qgis_3d.h"
+
+#include <QMap>
+#include <QString>
+
+#define SIP_NO_FILE
+
+class QgsReadWriteContext;
+class QDomElement;
+
+
+/**
+ * \brief Contains configuration for rendering shadows.
+ * \ingroup qgis_3d
+ * \since QGIS 3.16
+ */
+class _3D_EXPORT QgsShadowSettings
+{
+  public:
+    QgsShadowSettings() = default;
+    QgsShadowSettings( const QgsShadowSettings &other );
+    QgsShadowSettings &operator=( QgsShadowSettings const &rhs );
+
+    //! Reads settings from a DOM \a element
+    void readXml( const QDomElement &element, const QgsReadWriteContext &context );
+    //! Writes settings to a DOM \a element
+    void writeXml( QDomElement &element, const QgsReadWriteContext &context ) const;
+
+    //! Returns whether shadow rendering is enabled
+    bool renderShadows() const { return mRenderShadows; }
+
+    /**
+     * Returns the ID of the light source casting shadows.
+     *
+     * \see setLightSource()
+     * \since QGIS 4.2
+     */
+    QString lightSource() const { return mLightSourceId; }
+
+    /**
+     * Returns the maximum shadow rendering distance accounted for when rendering shadows
+     * Objects further away from the camera than the specified distance won't cast shadows
+     * This helps with producing a reasonable shadow resolution when looking at a large area or up to the sky
+     * \since QGIS 3.16
+     */
+    double maximumShadowRenderingDistance() const { return mMaximumShadowRenderingDistance; }
+
+    /**
+     * Returns the shadow bias used to correct the numerical imprecision of shadows (for the depth test)
+     * This helps with reducing the self shadowing artifact
+     * \since QGIS 3.16
+     */
+    double shadowBias() const { return mShadowBias; }
+
+    /**
+     * Returns the quality of the shadow map texture used to generate the shadows.
+     *
+     * \see setShadowQuality()
+     * \since QGIS 4.2
+     */
+    Qgis::ShadowQuality shadowQuality() const { return mShadowQuality; }
+
+    //! Sets whether shadow rendering is enabled
+    void setRenderShadows( bool enabled ) { mRenderShadows = enabled; }
+
+    /**
+     * Sets the \a id of the light source casting shadows.
+     *
+     * \see lightSource()
+     * \since QGIS 4.2
+     */
+    void setLightSource( const QString &id ) { mLightSourceId = id; }
+
+    /**
+     * Sets the maximum shadow rendering distance accounted for when rendering shadows
+     * Objects further away from the camera than the specified distance won't cast shadows
+     * This helps with producing a reasonable shadow resolution when looking at a large area or up to the sky
+     * \since QGIS 3.16
+     */
+    void setMaximumShadowRenderingDistance( double distance ) { mMaximumShadowRenderingDistance = distance; }
+
+    /**
+     * Sets the shadow bias value
+     * Tweak this to reduce artifacts like self shadowing
+     * A reasonable range of values can be between a very small positive value like 0.00000001 and 0.1
+     * \since QGIS 3.16
+     */
+    void setShadowBias( double shadowBias ) { mShadowBias = shadowBias; }
+
+    /**
+     * Sets the \a quality of the shadow map texture.
+     *
+     * \see shadowQuality()
+     * \since QGIS 4.2
+     */
+    void setShadowQuality( Qgis::ShadowQuality quality ) { mShadowQuality = quality; }
+
+    /**
+     * Returns the shadow map resolution corresponding to the specified shadow \a quality.
+     *
+     * \since QGIS 4.2
+     */
+    static int qualityToMapResolution( Qgis::ShadowQuality quality );
+
+    /**
+     * Returns TRUE if the cascading shadow splits should be tinted in the view.
+     *
+     * For debugging and testing purposes only.
+     *
+     * \see setShowCascadeSplits()
+     */
+    bool showCascadeSplits() const;
+
+    /**
+     * Sets whether the cascading shadow splits should be tinted in the view.
+     *
+     * For debugging and testing purposes only.
+     *
+     * \see showCascadeSplits()
+     */
+    void setShowCascadeSplits( bool show );
+
+  private:
+    bool mRenderShadows = false;
+    QString mLightSourceId;
+    double mMaximumShadowRenderingDistance = 1500.0;
+    double mShadowBias = 0.00001;
+    Qgis::ShadowQuality mShadowQuality = Qgis::ShadowQuality::High;
+    bool mShowCascadeSplits = false;
+};
+
+#endif // QGSSKYBOXSETTINGS_H

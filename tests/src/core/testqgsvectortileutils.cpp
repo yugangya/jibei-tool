@@ -1,0 +1,136 @@
+/***************************************************************************
+  testqgsvectortileutils.cpp
+  --------------------------------------
+  Date                 : November 2021
+  Copyright            : (C) 2021 by Mathieu Pellerin
+  Email                : nirvn dot asia at gmail dot com
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#include "qgstest.h"
+
+#include <QObject>
+#include <QString>
+#include <QTemporaryFile>
+
+using namespace Qt::StringLiterals;
+
+//qgis includes...
+#include "qgsapplication.h"
+#include "qgsvectortileutils.h"
+
+/**
+ * \ingroup UnitTests
+ * This is a unit test for the vector tile utils class
+ */
+class TestQgsVectorTileUtils : public QObject
+{
+    Q_OBJECT
+
+  public:
+    TestQgsVectorTileUtils() = default;
+
+  private:
+  private slots:
+    void initTestCase();    // will be called before the first testfunction is executed.
+    void cleanupTestCase(); // will be called after the last testfunction was executed.
+    void init() {}          // will be called before each testfunction is executed.
+    void cleanup() {}       // will be called after every testfunction.
+
+    void test_scaleToZoomLevel();
+    void test_urlsFromStyle();
+    void test_mapboxUrls_data();
+    void test_mapboxUrls();
+};
+
+
+void TestQgsVectorTileUtils::initTestCase()
+{
+  // init QGIS's paths - true means that all path will be inited from prefix
+  QgsApplication::init();
+  QgsApplication::initQgis();
+}
+
+void TestQgsVectorTileUtils::cleanupTestCase()
+{
+  QgsApplication::exitQgis();
+}
+
+void TestQgsVectorTileUtils::test_scaleToZoomLevel()
+{
+  // test zoom level logic
+  int zoomLevel = QgsVectorTileUtils::scaleToZoomLevel( 288896, 0, 20 );
+  QCOMPARE( zoomLevel, 10 );
+}
+
+void TestQgsVectorTileUtils::test_urlsFromStyle()
+{
+  QString dataDir( TEST_DATA_DIR );
+  QFile style1File( dataDir + "/vector_tile/styles/style1.json" );
+  QVERIFY( style1File.open( QIODevice::Text | QIODevice::ReadOnly ) );
+  QString style1Content = style1File.readAll();
+  style1File.close();
+  style1Content.replace( QString( "_TILE_SOURCE_TEST_PATH_" ), "file://" + dataDir + "/vector_tile/styles" );
+  style1Content.replace( QString( "_TILE_SOURCE_EXTERNE_TEST_PATH_" ), "file://" + dataDir + "/vector_tile/styles_externe" );
+  QFile fixedStyleFilePath( QDir::tempPath() + u"/style1.json"_s );
+  if ( fixedStyleFilePath.open( QFile::WriteOnly | QFile::Truncate ) )
+  {
+    QTextStream out( &fixedStyleFilePath );
+    out << style1Content;
+  }
+  fixedStyleFilePath.close();
+
+  auto sources = QgsVectorTileUtils::parseStyleSourceUrl( "file://" + fixedStyleFilePath.fileName() );
+  QCOMPARE( sources.count(), 3 );
+  QVERIFY( sources.contains( "base_v1.0.0" ) );
+  QString sourceUrl = sources.value( "base_v1.0.0" );
+  sourceUrl.replace( QRegularExpression( "vectortiles[0-9]" ), u"vectortilesX"_s );
+  QCOMPARE( sourceUrl, "https://vectortilesX.geo.admin.ch/tiles/ch.swisstopo.base.vt/v1.0.0/{z}/{x}/{y}.pbf" );
+  QVERIFY( sources.contains( "terrain_v1.0.0" ) );
+  sourceUrl = sources.value( "terrain_v1.0.0" );
+  sourceUrl.replace( QRegularExpression( "vectortiles[0-9]" ), u"vectortilesX"_s );
+  QCOMPARE( sourceUrl, "https://vectortilesX.geo.admin.ch/tiles/ch.swisstopo.relief.vt/v1.0.0/{z}/{x}/{y}.pbf" );
+  QVERIFY( sources.contains( "terrain_externe_v1.0.0" ) );
+  sourceUrl = sources.value( "terrain_externe_v1.0.0" );
+  QCOMPARE( sourceUrl, "file://" + dataDir + "/vector_tile/styles_externe/VectorTileServer/tile/{z}/{y}/{x}.pbf" );
+
+
+  sources = QgsVectorTileUtils::parseStyleSourceUrl( "file://" + dataDir + "/vector_tile/styles/style2.json" );
+  QCOMPARE( sources.count(), 2 );
+  QVERIFY( sources.contains( "plan_ign" ) );
+  QCOMPARE( sources.value( "plan_ign" ), "https://data.geopf.fr/tms/1.0.0/PLAN.IGN/{z}/{x}/{y}.pbf" );
+  QVERIFY( sources.contains( "plan_ign_relative" ) );
+  QCOMPARE( sources.value( "plan_ign_relative" ), "file:///tms/1.0.0/PLAN.IGN/{z}/{x}/{y}.pbf" );
+}
+
+
+void TestQgsVectorTileUtils::test_mapboxUrls_data()
+{
+  QTest::addColumn<QString>( "url" );
+  QTest::addColumn<QString>( "apiKey" );
+  QTest::addColumn<QString>( "expected" );
+
+  QTest::newRow( "not mapbox" ) << "https://mytiles.com" << QString() << "https://mytiles.com";
+  QTest::newRow( "mapbox style" ) << "mapbox://styles/mapbox/dark-v11" << "abc123" << "https://api.mapbox.com/styles/v1/mapbox/dark-v11?access_token=abc123";
+  QTest::newRow( "mapbox sprite" ) << "mapbox://sprites/mapbox/streets-v11" << "abc123" << "https://api.mapbox.com/styles/v1/mapbox/streets-v11/sprite?access_token=abc123";
+  QTest::newRow( "mapbox fonts" ) << "mapbox://fonts/mapbox/Open Sans Regular/123.pbf" << "abc123" << "https://api.mapbox.com/fonts/v1/mapbox/Open Sans Regular/123.pbf?access_token=abc123";
+  QTest::newRow( "mapbox sources" ) << "mapbox://username.tileset_id" << "abc123" << "https://api.mapbox.com/v4/username.tileset_id.json?secure&access_token=abc123";
+}
+
+void TestQgsVectorTileUtils::test_mapboxUrls()
+{
+  QFETCH( QString, url );
+  QFETCH( QString, apiKey );
+  QFETCH( QString, expected );
+
+  QCOMPARE( QgsVectorTileUtils::resolveMapboxUri( url, apiKey ), expected );
+}
+
+QGSTEST_MAIN( TestQgsVectorTileUtils )
+#include "testqgsvectortileutils.moc"

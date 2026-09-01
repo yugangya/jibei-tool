@@ -1,0 +1,138 @@
+/***************************************************************************
+     testqgsappbrowserproviders.cpp
+     --------------------------------------
+    Date                 : October 30 2018
+    Copyright            : (C) 2018 Nyall Dawson
+    Email                : nyall dot dawson at gmail dot com
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+#include "qgstest.h"
+
+#include <QObject>
+#include <QString>
+#include <QStringList>
+
+using namespace Qt::StringLiterals;
+
+//qgis includes...
+#include "qgsdataitem.h"
+#include "qgsapplication.h"
+#include "qgslogger.h"
+#include "qgsdataitemprovider.h"
+#include "qgsdataitemproviderregistry.h"
+#include "qgsfilebaseddataitemprovider.h"
+#include "qgssettings.h"
+#include "qgssettingsentryimpl.h"
+#include "qgsappbrowserproviders.h"
+#include "qgsdirectoryitem.h"
+
+class TestQgsAppBrowserProviders : public QObject
+{
+    Q_OBJECT
+
+  public:
+    TestQgsAppBrowserProviders();
+
+  private slots:
+    void initTestCase();    // will be called before the first testfunction is executed.
+    void cleanupTestCase(); // will be called after the last testfunction was executed.
+    void init() {}          // will be called before each testfunction is executed.
+    void cleanup() {}       // will be called after every testfunction.
+
+    void testProjectItemCreation();
+
+  private:
+    QgsDirectoryItem *mDirItem = nullptr;
+    QString mScanItemsSetting;
+    QString mTestDataDir;
+};
+
+TestQgsAppBrowserProviders::TestQgsAppBrowserProviders() = default;
+
+void TestQgsAppBrowserProviders::initTestCase()
+{
+  //
+  // Runs once before any tests are run
+  //
+  // init QGIS's paths - true means that all path will be inited from prefix
+  QgsApplication::init();
+  QgsApplication::initQgis();
+  QgsApplication::showSettings();
+
+  const QString dataDir( TEST_DATA_DIR ); //defined in CmakeLists.txt
+  mTestDataDir = dataDir + '/';
+
+  // save current scanItemsSetting value
+  const QgsSettings settings;
+  mScanItemsSetting = QgsFileBasedDataItemProvider::settingsScanItemsInBrowser->value();
+
+  //create a directory item that will be used in all tests...
+  mDirItem = new QgsDirectoryItem( nullptr, u"Test"_s, TEST_DATA_DIR );
+}
+
+void TestQgsAppBrowserProviders::cleanupTestCase()
+{
+  // restore scanItemsSetting
+  QgsSettings settings;
+  QgsFileBasedDataItemProvider::settingsScanItemsInBrowser->setValue( mScanItemsSetting );
+  if ( mDirItem )
+    delete mDirItem;
+
+  QgsApplication::exitQgis();
+}
+
+
+void TestQgsAppBrowserProviders::testProjectItemCreation()
+{
+  QgsDirectoryItem *dirItem = new QgsDirectoryItem( nullptr, u"Test"_s, mTestDataDir + u"qgis_server/"_s );
+  QVector<QgsDataItem *> children = dirItem->createChildren();
+
+  // now, add a specific provider which handles project files
+  QgsApplication::dataItemProviderRegistry()->addProvider( new QgsProjectDataItemProvider() );
+
+  dirItem = new QgsDirectoryItem( nullptr, u"Test"_s, mTestDataDir + u"qgis_server/"_s );
+  children = dirItem->createChildren();
+
+  for ( QgsDataItem *child : children )
+  {
+    if ( child->type() == Qgis::BrowserItemType::Project && child->path() == mTestDataDir + u"qgis_server/test_project.qgs"_s )
+    {
+      child->populate( true );
+
+      QCOMPARE( child->children().count(), 9 );
+      QVERIFY( dynamic_cast<QgsProjectLayerTreeGroupItem *>( child->children().at( 4 ) ) );
+      QCOMPARE( child->children().at( 4 )->name(), u"groupwithoutshortname"_s );
+
+      QCOMPARE( child->children().at( 4 )->children().count(), 1 );
+      QVERIFY( dynamic_cast<QgsLayerItem *>( child->children().at( 4 )->children().at( 0 ) ) );
+      QCOMPARE( child->children().at( 4 )->children().at( 0 )->name(), u"testlayer3"_s );
+
+      QVERIFY( dynamic_cast<QgsProjectLayerTreeGroupItem *>( child->children().at( 5 ) ) );
+      QCOMPARE( child->children().at( 5 )->name(), u"groupwithshortname"_s );
+
+      QCOMPARE( child->children().at( 5 )->children().count(), 1 );
+      QVERIFY( dynamic_cast<QgsLayerItem *>( child->children().at( 5 )->children().at( 0 ) ) );
+      QCOMPARE( child->children().at( 5 )->children().at( 0 )->name(), u"testlayer2"_s );
+
+      QVERIFY( dynamic_cast<QgsLayerItem *>( child->children().at( 7 ) ) );
+      QCOMPARE( child->children().at( 7 )->name(), u"testlayer"_s );
+
+      QVERIFY( dynamic_cast<QgsLayerItem *>( child->children().at( 8 ) ) );
+      QCOMPARE( child->children().at( 8 )->name(), QStringLiteral( u"testlayer \u00E8\u00E9" ) );
+
+      delete dirItem;
+      return;
+    }
+  }
+  delete dirItem;
+  QVERIFY( false ); // should not be reached
+}
+
+QGSTEST_MAIN( TestQgsAppBrowserProviders )
+#include "testqgsappbrowserproviders.moc"

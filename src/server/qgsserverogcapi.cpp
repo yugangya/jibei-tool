@@ -1,0 +1,250 @@
+/***************************************************************************
+  qgsserverogcapi.cpp - QgsServerOgcApi
+
+ ---------------------
+ begin                : 10.7.2019
+ copyright            : (C) 2019 by Alessandro Pasotti
+ email                : elpaso at itopen dot it
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#include "qgsserverogcapi.h"
+
+#include "qgsapplication.h"
+#include "qgsmessagelog.h"
+#include "qgsserverogcapihandler.h"
+
+#include <QDebug>
+#include <QDir>
+#include <QString>
+#include <QtGlobal>
+
+#include "moc_qgsserverogcapi.cpp"
+
+using namespace Qt::StringLiterals;
+
+QMap<QgsServerOgcApi::ContentType, QStringList> QgsServerOgcApi::sContentTypeMime = []() -> QMap<QgsServerOgcApi::ContentType, QStringList> {
+  QMap<QgsServerOgcApi::ContentType, QStringList> map;
+  map[QgsServerOgcApi::ContentType::JSON] = QStringList { u"application/json"_s };
+  map[QgsServerOgcApi::ContentType::SCHEMA_JSON] = QStringList { u"application/schema+json"_s };
+  map[QgsServerOgcApi::ContentType::GEOJSON] = QStringList { u"application/geo+json"_s, u"application/vnd.geo+json"_s, u"application/geojson"_s };
+  map[QgsServerOgcApi::ContentType::HTML] = QStringList { u"text/html"_s };
+  map[QgsServerOgcApi::ContentType::OPENAPI3] = QStringList { u"application/vnd.oai.openapi+json;version=3.0"_s };
+  map[QgsServerOgcApi::ContentType::XML] = QStringList { u"application/xml"_s };
+  map[QgsServerOgcApi::ContentType::FLATGEOBUF] = QStringList { u"application/flatgeobuf"_s, u"application/vnd.fgb"_s };
+  return map;
+}();
+
+QHash<QgsServerOgcApi::ContentType, QList<QgsServerOgcApi::ContentType>> QgsServerOgcApi::sContentTypeAliases = []() -> QHash<ContentType, QList<ContentType>> {
+  QHash<QgsServerOgcApi::ContentType, QList<QgsServerOgcApi::ContentType>> map;
+  map[ContentType::JSON] = { QgsServerOgcApi::ContentType::GEOJSON, QgsServerOgcApi::ContentType::OPENAPI3, QgsServerOgcApi::ContentType::SCHEMA_JSON };
+  return map;
+}();
+
+
+QgsServerOgcApi::QgsServerOgcApi( QgsServerInterface *serverIface, const QString &rootPath, const QString &name, const QString &description, const QString &version )
+  : QgsServerApi( serverIface )
+  , mRootPath( rootPath )
+  , mName( name )
+  , mDescription( description )
+  , mVersion( version )
+{}
+
+QgsServerOgcApi::~QgsServerOgcApi()
+{
+  //qDebug() << "API destroyed: " << name();
+}
+
+void QgsServerOgcApi::registerHandler( QgsServerOgcApiHandler *handler )
+{
+  std::shared_ptr<QgsServerOgcApiHandler> hp( handler );
+  mHandlers.emplace_back( std::move( hp ) );
+}
+
+QUrl QgsServerOgcApi::sanitizeUrl( const QUrl &url )
+{
+  // Since QT 5.12 NormalizePathSegments does not collapse double slashes
+  QUrl u { url.adjusted( QUrl::StripTrailingSlash | QUrl::NormalizePathSegments ) };
+  if ( u.path().contains( "//"_L1 ) )
+  {
+    u.setPath( u.path().replace( "//"_L1, QChar( '/' ) ) );
+  }
+  // Make sure the path starts with '/'
+  if ( !u.path().startsWith( '/' ) )
+  {
+    u.setPath( u.path().prepend( '/' ) );
+  }
+  return u;
+}
+
+void QgsServerOgcApi::executeRequest( const QgsServerApiContext &context ) const
+{
+  // Get url
+  const auto path { sanitizeUrl( context.handlerPath() ).path() };
+  // Find matching handler
+  auto hasMatch { false };
+  for ( const auto &handler : mHandlers )
+  {
+    QgsMessageLog::logMessage( u"Checking API path %1 for %2 "_s.arg( path, handler->path().pattern() ), u"Server"_s, Qgis::MessageLevel::Info );
+    if ( handler->path().match( path ).hasMatch() )
+    {
+      hasMatch = true;
+      // Execute handler
+      QgsMessageLog::logMessage( u"API %1: found handler %2"_s.arg( name(), QString::fromStdString( handler->operationId() ) ), u"Server"_s, Qgis::MessageLevel::Info );
+      // May throw QgsServerApiBadRequestException or JSON exceptions on serializing
+      try
+      {
+        handler->handleRequest( context );
+      }
+      catch ( json::exception &ex )
+      {
+        throw QgsServerApiInternalServerError( u"The API handler returned an error: %1"_s.arg( ex.what() ) );
+      }
+      break;
+    }
+  }
+  // Throw
+  if ( !hasMatch )
+  {
+    throw QgsServerApiBadRequestException( u"Requested URI does not match any registered API handler"_s );
+  }
+}
+
+const QMap<QgsServerOgcApi::ContentType, QStringList> QgsServerOgcApi::contentTypeMimes()
+{
+  return sContentTypeMime;
+}
+
+const QHash<QgsServerOgcApi::ContentType, QList<QgsServerOgcApi::ContentType>> QgsServerOgcApi::contentTypeAliases()
+{
+  return sContentTypeAliases;
+}
+
+QString QgsServerOgcApi::profileToString( const Profile &profile )
+{
+  switch ( profile )
+  {
+    case Profile::Rfc7946:
+      return u"json"_s;
+    case Profile::JsonFg:
+      return u"jsonfg"_s;
+    case Profile::JsonFgPlus:
+      return u"jsonfg-plus"_s;
+    case Profile::Unset:
+      return QString();
+    case Profile::RelAsKey:
+      return u"rel-as-key"_s;
+    case Profile::RelAsUri:
+      return u"rel-as-uri"_s;
+    case Profile::RelAsLink:
+      return u"rel-as-link"_s;
+  }
+  Q_UNREACHABLE();
+  return QString();
+}
+
+QString QgsServerOgcApi::profileToUri( const Profile &profile )
+{
+  switch ( profile )
+  {
+    case Profile::Rfc7946:
+      return u"http://www.opengis.net/def/profile/ogc/0/rfc7946"_s;
+    case Profile::JsonFg:
+      return u"http://www.opengis.net/def/profile/ogc/0/jsonfg"_s;
+    case Profile::JsonFgPlus:
+      return u"http://www.opengis.net/def/profile/ogc/0/jsonfg-plus"_s;
+    case Profile::RelAsKey:
+      return u"http://www.opengis.net/def/profile/ogc/0/rel-as-key"_s;
+    case Profile::RelAsUri:
+      return u"http://www.opengis.net/def/profile/ogc/0/rel-as-uri"_s;
+    case Profile::RelAsLink:
+      return u"http://www.opengis.net/def/profile/ogc/0/rel-as-link"_s;
+    case Profile::Unset:
+      return QString();
+  }
+  Q_UNREACHABLE();
+  return QString();
+}
+
+std::string QgsServerOgcApi::relToString( const Rel &rel )
+{
+  if ( rel == Rel::schema )
+  {
+    return "http://www.opengis.net/def/rel/ogc/1.0/schema";
+  }
+  static const QMetaEnum metaEnum = QMetaEnum::fromType<QgsServerOgcApi::Rel>();
+  std::string val { metaEnum.valueToKey( rel ) };
+  std::replace( val.begin(), val.end(), '_', '-' );
+  return val;
+}
+
+QString QgsServerOgcApi::contentTypeToString( const ContentType &ct )
+{
+  static const QMetaEnum metaEnum = QMetaEnum::fromType<ContentType>();
+  QString result { metaEnum.valueToKey( ct ) };
+  return result.replace( '_', '-' );
+}
+
+std::string QgsServerOgcApi::contentTypeToStdString( const ContentType &ct )
+{
+  static const QMetaEnum metaEnum = QMetaEnum::fromType<ContentType>();
+  return metaEnum.valueToKey( ct );
+}
+
+QString QgsServerOgcApi::contentTypeToExtension( const ContentType &ct )
+{
+  switch ( ct )
+  {
+    case ContentType::SCHEMA_JSON:
+    {
+      return u"json"_s;
+    }
+    case ContentType::FLATGEOBUF:
+    {
+      return u"fgb"_s;
+    }
+    default:
+      return contentTypeToString( ct ).toLower();
+  }
+  // UNREACHABLE CODE
+}
+
+QgsServerOgcApi::ContentType QgsServerOgcApi::contentTypeFromExtension( const std::string &extension )
+{
+  const QString exts = QString::fromStdString( extension );
+  const auto constMimeTypes( QgsServerOgcApi::contentTypeMimes() );
+  for ( auto it = constMimeTypes.constBegin(); it != constMimeTypes.constEnd(); ++it )
+  {
+    const auto constValues = it.value();
+    for ( const auto &value : constValues )
+    {
+      if ( value.contains( exts, Qt::CaseSensitivity::CaseInsensitive ) )
+      {
+        return it.key();
+      }
+    }
+  }
+  // Default to JSON, but log a warning!
+  QgsMessageLog::logMessage( u"Content type for extension %1 not found! Returning default (JSON)"_s.arg( exts ), u"Server"_s, Qgis::MessageLevel::Warning );
+  return QgsServerOgcApi::ContentType::JSON;
+}
+
+std::string QgsServerOgcApi::mimeType( const QgsServerOgcApi::ContentType &contentType )
+{
+  if ( !sContentTypeMime.contains( contentType ) )
+  {
+    return "";
+  }
+  return sContentTypeMime.value( contentType ).first().toStdString();
+}
+
+const std::vector<std::shared_ptr<QgsServerOgcApiHandler>> QgsServerOgcApi::handlers() const
+{
+  return mHandlers;
+}

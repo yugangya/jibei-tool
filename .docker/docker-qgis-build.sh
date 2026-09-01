@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+
+set -e
+
+CTEST_SOURCE_DIR=${CTEST_SOURCE_DIR-/root/QGIS}
+CTEST_BUILD_DIR=${CTEST_BUILD_DIR-/root/QGIS/build}
+
+export LANG="C.UTF-8"
+
+##############
+# Setup ccache
+##############
+export CCACHE_TEMPDIR=/tmp
+# Github workflow cache max size is 2.0, but ccache data get compressed (roughly 1/5?)
+ccache -M 500M
+
+# Temporarily uncomment to debug ccache issues
+# export CCACHE_LOGFILE=/tmp/cache.debug
+ccache -z
+
+# To make ccache work properly with precompiled headers
+ccache --set-config sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime
+
+##############################
+# Variables for output styling
+##############################
+
+bold=$(tput bold)
+endbold=$(tput sgr0)
+
+###########
+# Configure
+###########
+pushd ${CTEST_SOURCE_DIR} > /dev/null
+mkdir -p ${CTEST_BUILD_DIR}
+pushd ${CTEST_BUILD_DIR} > /dev/null
+
+echo "${bold}Running cmake...${endbold}"
+echo "::group::cmake"
+
+BUILD_TYPE=Release
+
+CMAKE_C_COMPILER=/usr/bin/clang
+CMAKE_CXX_COMPILER=/usr/bin/clang++
+
+if [[ "${WITH_CLAZY}" = "ON" ]]; then
+  # In release mode, all variables in QgsDebugMsg would be considered unused
+  BUILD_TYPE=Debug
+
+  # ignore sip and external libraries
+  export CLAZY_IGNORE_DIRS="(.*/external/.*)|(.*sip_.*part.*)"
+fi
+
+CLANG_WARNINGS="-Wrange-loop-construct"
+
+CMAKE_EXTRA_ARGS=()
+
+if [[ "${WITH_COMPILE_COMMANDS}" == "ON" ]]; then
+  CMAKE_EXTRA_ARGS+=(
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+  )
+fi
+
+if [[ ${WITH_GRASS7} == "ON" || ${WITH_GRASS8} == "ON" ]]; then
+  CMAKE_EXTRA_ARGS+=(
+    "-DGRASS_PREFIX$( grass --config version | cut -b 1 )=$( grass --config path )"
+  )
+fi
+
+CMAKE_EXTRA_ARGS+=(
+  "-DUSE_ALTERNATE_LINKER=mold"
+)
+
+cmake \
+ -GNinja \
+ -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+ -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} \
+ -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER} \
+ -DUSE_CCACHE=ON \
+ -DWITH_DESKTOP=ON \
+ -DWITH_ANALYSIS=ON \
+ -DWITH_GUI=ON \
+ -DWITH_QUICK=${WITH_QUICK} \
+ -DWITH_3D=${WITH_3D} \
+ -DWITH_STAGED_PLUGINS=ON \
+ -DWITH_GRASS7=${WITH_GRASS7} \
+ -DWITH_GRASS8=${WITH_GRASS8} \
+ -DWITH_GRASS_PLUGIN=${WITH_GRASS8} \
+ -DENABLE_TESTS=ON \
+ -DENABLE_MODELTEST=${WITH_MODEL_TEST} \
+ -DENABLE_PGTEST=${WITH_PG_TEST} \
+ -DENABLE_MSSQLTEST=${WITH_MSSQL_TEST} \
+ -DENABLE_MSSQLTEST_CPP=${WITH_MSSQL_TEST} \
+ -DENABLE_HANATEST=${WITH_HANA_TEST} \
+ -DENABLE_ORACLETEST=${WITH_ORACLE_TEST} \
+ -DENABLE_UNITY_BUILDS=${ENABLE_UNITY_BUILDS} \
+ -DPUSH_TO_CDASH=${PUSH_TO_CDASH} \
+ -DWITH_HANA=ON \
+ -DWITH_QGIS_PROCESS=ON \
+ -DWITH_QSPATIALITE=${WITH_QSPATIALITE} \
+ -DWITH_APIDOC=OFF \
+ -DWITH_BINDINGS=ON \
+ -DWITH_GEOGRAPHICLIB=ON \
+ -DWITH_SERVER=ON \
+ -DWITH_SERVER_LANDINGPAGE_WEBAPP=${WITH_SERVER_LANDINGPAGE_WEBAPP} \
+ -DWITH_ORACLE=ON \
+ -DWITH_PDAL=${WITH_PDAL} \
+ -DWITH_QTSERIALPORT=ON \
+ -DWITH_PDF4QT=${WITH_PDF4QT} \
+ -DWITH_SFCGAL=${WITH_SFCGAL} \
+ -DWITH_INTERNAL_SPATIALINDEX=${WITH_INTERNAL_SPATIALINDEX} \
+ -DORACLE_INCLUDEDIR=/instantclient_21_16/sdk/include/ \
+ -DORACLE_LIBDIR=/instantclient_21_16/ \
+ -DDISABLE_DEPRECATED=ON \
+ -DPYTHON_TEST_WRAPPER="timeout -sSIGSEGV 55s" \
+ -DCXX_EXTRA_FLAGS="${CLANG_WARNINGS}" \
+ -DWERROR=TRUE \
+ -DAGGRESSIVE_SAFE_MODE=ON \
+ -DWITH_CLAZY=${WITH_CLAZY} \
+ "${CMAKE_EXTRA_ARGS[@]}" ..
+echo "::endgroup::"
+
+# Workaround https://github.com/actions/checkout/issues/760
+git config --global --add safe.directory ${CTEST_SOURCE_DIR}
+git config --global --add safe.directory ${CTEST_BUILD_DIR}
+
+#######
+# Build
+#######
+echo "${bold}Building QGIS...${endbold}"
+echo "::group::build"
+ctest -VV -S ${CTEST_SOURCE_DIR}/.ci/config_build.ctest
+echo "::endgroup::"
+
+########################
+# Show ccache statistics
+########################
+echo "ccache statistics"
+ccache -s
+
+popd > /dev/null # ${CTEST_BUILD_DIR}
+popd > /dev/null # ${CTEST_SOURCE_DIR}
+
+[ -r /tmp/ctest-important.log ] && cat /tmp/ctest-important.log || true

@@ -1,0 +1,133 @@
+# -*- coding: utf-8 -*-
+
+"""
+***************************************************************************
+    __init__.py
+    ---------------------
+    Date                 : May 2014
+    Copyright            : (C) 2014 by Nathan Woodrow
+    Email                : woodrow dot nathan at gmail dot com
+***************************************************************************
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License as published by  *
+*   the Free Software Foundation; either version 2 of the License, or     *
+*   (at your option) any later version.                                   *
+*                                                                         *
+***************************************************************************
+"""
+
+__author__ = 'Nathan Woodrow'
+__date__ = 'May 2014'
+__copyright__ = '(C) 2014, Nathan Woodrow'
+
+from qgis.PyQt import QtCore
+from qgis._gui import *
+from qgis.core import Qgis as _Qgis
+from .additions.qgssettingsenumflageditorwrapper import PyQgsSettingsEnumEditorWidgetWrapper
+
+@MONKEYPATCH_INJECTIONS@
+
+# monkey patching scoped based enum
+QgsMapToolCapture.CaptureTechnique = _Qgis.CaptureTechnique
+QgsMapToolCapture.StraightSegments = _Qgis.CaptureTechnique.StraightSegments
+QgsMapToolCapture.StraightSegments.is_monkey_patched = True
+QgsMapToolCapture.StraightSegments.__doc__ = "Default capture mode - capture occurs with straight line segments"
+QgsMapToolCapture.CircularString = _Qgis.CaptureTechnique.CircularString
+QgsMapToolCapture.CircularString.is_monkey_patched = True
+QgsMapToolCapture.CircularString.__doc__ = "Capture in circular strings"
+QgsMapToolCapture.Streaming = _Qgis.CaptureTechnique.Streaming
+QgsMapToolCapture.Streaming.is_monkey_patched = True
+QgsMapToolCapture.Streaming.__doc__ = "Streaming points digitizing mode (points are automatically added as the mouse cursor moves)."
+QgsMapToolCapture.Shape = _Qgis.CaptureTechnique.Shape
+QgsMapToolCapture.Shape.is_monkey_patched = True
+QgsMapToolCapture.Shape.__doc__ = "Digitize shapes."
+
+QgsActionMenu.ActionType = _Qgis.ActionType
+# monkey patching scoped based enum
+QgsActionMenu.Invalid = _Qgis.ActionType.Invalid
+QgsActionMenu.Invalid.is_monkey_patched = True
+QgsActionMenu.Invalid.__doc__ = "Invalid"
+QgsActionMenu.MapLayerAction = _Qgis.ActionType.MapLayerAction
+QgsActionMenu.MapLayerAction.is_monkey_patched = True
+QgsActionMenu.MapLayerAction.__doc__ = "Standard actions (defined by core or plugins), corresponds to QgsMapLayerAction class."
+QgsActionMenu.AttributeAction = _Qgis.ActionType.AttributeAction
+QgsActionMenu.AttributeAction.is_monkey_patched = True
+QgsActionMenu.AttributeAction.__doc__ = "Custom actions (manually defined in layer properties), corresponds to QgsAction class."
+
+QgsMapLayerAction.Target = _Qgis.MapLayerActionTarget
+# monkey patching scoped based enum
+QgsMapLayerAction.Layer = _Qgis.MapLayerActionTarget.Layer
+QgsMapLayerAction.Layer.is_monkey_patched = True
+QgsMapLayerAction.Layer.__doc__ = "Action targets a complete layer"
+QgsMapLayerAction.SingleFeature = _Qgis.MapLayerActionTarget.SingleFeature
+QgsMapLayerAction.SingleFeature.is_monkey_patched = True
+QgsMapLayerAction.SingleFeature.__doc__ = "Action targets a single feature from a layer"
+QgsMapLayerAction.MultipleFeatures = _Qgis.MapLayerActionTarget.MultipleFeatures
+QgsMapLayerAction.MultipleFeatures.is_monkey_patched = True
+QgsMapLayerAction.MultipleFeatures.__doc__ = "Action targets multiple features from a layer"
+QgsMapLayerAction.AllActions = _Qgis.MapLayerActionTarget.AllActions
+QgsMapLayerAction.AllActions.is_monkey_patched = True
+QgsMapLayerAction.AllActions.__doc__ = ""
+QgsMapLayerAction.Targets = _Qgis.MapLayerActionTargets
+
+QgsMapLayerAction.Flag = _Qgis.MapLayerActionFlag
+# monkey patching scoped based enum
+QgsMapLayerAction.EnabledOnlyWhenEditable = _Qgis.MapLayerActionFlag.EnabledOnlyWhenEditable
+QgsMapLayerAction.EnabledOnlyWhenEditable.is_monkey_patched = True
+QgsMapLayerAction.EnabledOnlyWhenEditable.__doc__ = "Action should be shown only for editable layers"
+QgsMapLayerAction.Flags = _Qgis.MapLayerActionFlags
+
+QgsProcessingGui.WidgetType = _Qgis.ProcessingMode
+# monkey patching scoped based enum
+QgsProcessingGui.Standard = _Qgis.ProcessingMode.Standard
+QgsProcessingGui.Standard.is_monkey_patched = True
+QgsProcessingGui.Standard.__doc__ = "Standard (single-run) algorithm mode"
+QgsProcessingGui.Batch = _Qgis.ProcessingMode.Batch
+QgsProcessingGui.Batch.is_monkey_patched = True
+QgsProcessingGui.Batch.__doc__ = "Batch processing mode"
+QgsProcessingGui.Modeler = _Qgis.ProcessingMode.Modeler
+QgsProcessingGui.Modeler.is_monkey_patched = True
+QgsProcessingGui.Modeler.__doc__ = "Modeler mode"
+
+QgsRubberBand.IconType = _Qgis.RubberBandIconType
+# monkey patching scoped based enum
+QgsRubberBand.ICON_NONE = _Qgis.RubberBandIconType.NoIcon
+QgsRubberBand.IconType.ICON_NONE = _Qgis.RubberBandIconType.NoIcon
+QgsRubberBand.ICON_NONE.is_monkey_patched = True
+QgsRubberBand.ICON_NONE.__doc__ = "No icon is used"
+QgsRubberBand.ICON_CROSS = _Qgis.RubberBandIconType.CrossPlus
+QgsRubberBand.IconType.ICON_CROSS = _Qgis.RubberBandIconType.CrossPlus
+QgsRubberBand.ICON_CROSS.is_monkey_patched = True
+QgsRubberBand.ICON_CROSS.__doc__ = "A cross is used to highlight points (+)"
+QgsRubberBand.ICON_X = _Qgis.RubberBandIconType.CrossX
+QgsRubberBand.IconType.ICON_X = _Qgis.RubberBandIconType.CrossX
+QgsRubberBand.ICON_X.is_monkey_patched = True
+QgsRubberBand.ICON_X.__doc__ = "A cross is used to highlight points (x)"
+QgsRubberBand.ICON_BOX = _Qgis.RubberBandIconType.Box
+QgsRubberBand.IconType.ICON_BOX = _Qgis.RubberBandIconType.Box
+QgsRubberBand.ICON_BOX.is_monkey_patched = True
+QgsRubberBand.ICON_BOX.__doc__ = "A box is used to highlight points (□)"
+QgsRubberBand.ICON_CIRCLE = _Qgis.RubberBandIconType.Circle
+QgsRubberBand.IconType.ICON_CIRCLE = _Qgis.RubberBandIconType.Circle
+QgsRubberBand.ICON_CIRCLE.is_monkey_patched = True
+QgsRubberBand.ICON_CIRCLE.__doc__ = "A circle is used to highlight points (○)"
+QgsRubberBand.ICON_NONE = _Qgis.RubberBandIconType.BoxFilled
+QgsRubberBand.IconType.ICON_NONE = _Qgis.RubberBandIconType.BoxFilled
+QgsRubberBand.ICON_NONE.is_monkey_patched = True
+QgsRubberBand.ICON_NONE.__doc__ = "A filled box is used to highlight points (■)"
+QgsRubberBand.ICON_DIAMOND = _Qgis.RubberBandIconType.Diamond
+QgsRubberBand.IconType.ICON_DIAMOND = _Qgis.RubberBandIconType.Diamond
+QgsRubberBand.ICON_DIAMOND.is_monkey_patched = True
+QgsRubberBand.ICON_DIAMOND.__doc__ = "A diamond is used to highlight points (◇)"
+QgsRubberBand.ICON_FULL_DIAMOND = _Qgis.RubberBandIconType.DiamondFilled
+QgsRubberBand.IconType.ICON_FULL_DIAMOND = _Qgis.RubberBandIconType.DiamondFilled
+QgsRubberBand.ICON_FULL_DIAMOND.is_monkey_patched = True
+QgsRubberBand.ICON_FULL_DIAMOND.__doc__ = "A filled diamond is used to highlight points (◆)"
+QgsRubberBand.ICON_SVG = _Qgis.RubberBandIconType.SVG
+QgsRubberBand.IconType.ICON_SVG = _Qgis.RubberBandIconType.SVG
+QgsRubberBand.ICON_SVG.is_monkey_patched = True
+QgsRubberBand.ICON_SVG.__doc__ = "An SVG image is used to highlight points"
+
+# Classes patched
+QgsSettingsEnumEditorWidgetWrapper = PyQgsSettingsEnumEditorWidgetWrapper

@@ -1,0 +1,1995 @@
+/***************************************************************************
+     testqgsstyle.cpp
+     --------------------------------------
+    Date                 : Wed Aug  1 12:13:24 BRT 2012
+    Copyright            : (C) 2012 Etienne Tourigny and Tim Sutton
+    Email                : etourigny dot dev at gmail.com
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+#include "qgstest.h"
+
+#include <QApplication>
+#include <QFileInfo>
+#include <QObject>
+#include <QSignalSpy>
+#include <QString>
+#include <QStringList>
+
+using namespace Qt::StringLiterals;
+
+// clazy:excludeall=qcolor-from-literal
+
+//qgis includes...
+#include "qgsmultirenderchecker.h"
+#include <qgsapplication.h>
+#include "qgslogger.h"
+#include "qgscolorramp.h"
+#include "qgscptcityarchive.h"
+#include "qgsvectorlayer.h"
+#include "qgssinglesymbolrenderer.h"
+#include "qgsmarkersymbollayer.h"
+#include "qgsrulebasedrenderer.h"
+#include "qgsvectorlayerlabeling.h"
+#include "qgsstyle.h"
+#include "qgsproject.h"
+#include "qgsstyleentityvisitor.h"
+#include "qgsrasterlayer.h"
+#include "qgsrastershader.h"
+#include "qgssinglebandpseudocolorrenderer.h"
+#include "qgsprintlayout.h"
+#include "qgslayoutitemscalebar.h"
+#include "qgsfontutils.h"
+#include "qgslayoutmanager.h"
+#include "qgsannotationmanager.h"
+#include "qgstextannotation.h"
+#include "qgslayoutitemlegend.h"
+#include "qgslayertreelayer.h"
+#include "qgsmaplayerlegend.h"
+#include "qgsabstract3dsymbol.h"
+#include "qgs3dsymbolregistry.h"
+#include "qgsmarkersymbol.h"
+#include "qgsfillsymbol.h"
+#include "qgsgoochmaterialsettings.h"
+#include "qgsphongmaterialsettings.h"
+
+/**
+ * \ingroup UnitTests
+ * This is a unit test to verify that styles are working correctly
+ */
+class TestStyle : public QgsTest
+{
+    Q_OBJECT
+
+  public:
+    TestStyle()
+      : QgsTest( u"Style Tests"_s )
+    {}
+
+  private:
+    QgsStyle *mStyle = nullptr;
+    QString mTestDataDir;
+
+    bool testValidColor( QgsColorRamp *ramp, double value, const QColor &expected );
+    bool imageCheck( QgsMapSettings &ms, const QString &testName );
+
+    static bool compareItemLists( QList<QgsColorRampShader::ColorRampItem> &itemsList1, QList<QgsColorRampShader::ColorRampItem> &itemsList2 )
+    {
+      if ( itemsList1.size() != itemsList2.size() )
+        return false;
+      for ( int i = 0; i < itemsList1.size(); ++i )
+      {
+        if ( itemsList1[i].value != itemsList2[i].value )
+          return false;
+        if ( itemsList1[i].color.red() != itemsList2[i].color.red() )
+          return false;
+        if ( itemsList1[i].color.green() != itemsList2[i].color.green() )
+          return false;
+        if ( itemsList1[i].color.blue() != itemsList2[i].color.blue() )
+          return false;
+        if ( itemsList1[i].color.alpha() != itemsList2[i].color.alpha() )
+          return false;
+      }
+      return true;
+    }
+  private slots:
+
+    // init / cleanup
+    void initTestCase();    // will be called before the first testfunction is executed.
+    void cleanupTestCase(); // will be called after the last testfunction was executed.
+    void init() {}          // will be called before each testfunction is executed.
+    void cleanup() {}       // will be called after every testfunction.
+    // void initStyles();
+
+    void testProperties();
+    void testCreateSymbols();
+    void testCreateColorRamps();
+    void testCreateTextFormats();
+    void testCreateLabelSettings();
+    void testCreateLegendPatchShapes();
+    void testCreate3dSymbol();
+    void testCreateMaterialSettings();
+    void testLoadColorRamps();
+    void testSaveLoad();
+    void testFavorites();
+    void testTags();
+    void testSmartGroup();
+    void testIsStyleXml();
+    void testVisitor();
+    void testColorRampShaderClassificationEqualInterval();
+    void testColorRampShaderClassificationContinius();
+    void testDefaultLabelTextFormat();
+};
+
+
+class Dummy3DSymbol : public QgsAbstract3DSymbol
+{
+  public:
+    static QgsAbstract3DSymbol *create() { return new Dummy3DSymbol; }
+    QString type() const override { return u"dummy"_s; }
+    QgsAbstract3DSymbol *clone() const override
+    {
+      Dummy3DSymbol *res = new Dummy3DSymbol();
+      res->id = id;
+      return res;
+    }
+    void readXml( const QDomElement &elem, const QgsReadWriteContext & ) override { id = elem.attribute( u"id"_s ); }
+    void writeXml( QDomElement &elem, const QgsReadWriteContext & ) const override { elem.setAttribute( u"id"_s, id ); }
+    void setMaterialSettings( QgsAbstractMaterialSettings * ) override {};
+    QList<Qgis::GeometryType> compatibleGeometryTypes() const override { return QList<Qgis::GeometryType>() << Qgis::GeometryType::Point << Qgis::GeometryType::Line; }
+
+    QString id;
+};
+
+// slots
+void TestStyle::initTestCase()
+{
+  // initialize with test settings directory so we don't mess with user's stuff
+  QgsApplication::init( QDir::tempPath() + "/dot-qgis" );
+  QgsApplication::initQgis();
+  QgsApplication::createDatabase();
+  mTestDataDir = QStringLiteral( TEST_DATA_DIR ) + '/'; //defined in CmakeLists.txt
+
+  // output test environment
+  QgsApplication::showSettings();
+
+  //initize a temporary memory-based style for tests to avoid clashing with shipped symbols
+  mStyle = new QgsStyle();
+  mStyle->createMemoryDatabase();
+
+  // now cheat!
+  QgsStyle::sDefaultStyle = mStyle;
+
+  // cpt-city ramp, small selection available in <testdir>/cpt-city
+  QgsCptCityArchive::initArchives();
+
+  QgsApplication::symbol3DRegistry()->addSymbolType( new Qgs3DSymbolMetadata( u"dummy"_s, QObject::tr( "Dummy" ), &Dummy3DSymbol::create, nullptr, nullptr ) );
+}
+
+void TestStyle::cleanupTestCase()
+{
+  // don't save
+  // mStyle->save();
+
+  // don't delete -- it's handled by exitQgis, cos we've set mStyle as the static default style instance
+  // delete mStyle;
+
+  QgsCptCityArchive::clearArchives();
+  QgsApplication::exitQgis();
+}
+
+void TestStyle::testProperties()
+{
+  QgsStyle s;
+  s.setName( u"my name"_s );
+  QCOMPARE( s.name(), u"my name"_s );
+
+  s.setFileName( u"file name"_s );
+  QCOMPARE( s.fileName(), u"file name"_s );
+
+  QVERIFY( !s.isReadOnly() );
+  s.setReadOnly( true );
+  QVERIFY( s.isReadOnly() );
+}
+
+void TestStyle::testCreateSymbols()
+{
+  // add some symbols to favorites
+  QgsStyle s;
+  s.createMemoryDatabase();
+
+  std::unique_ptr<QgsMarkerSymbol> sym1( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym2( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym3( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  const std::unique_ptr<QgsMarkerSymbol> sym4( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  s.addSymbol( u"symbolA"_s, sym1.release(), true );
+  s.addSymbol( u"symbolB"_s, sym2.release(), true );
+  s.addSymbol( u"symbolC"_s, sym3.release(), true );
+  QgsStyleSymbolEntity symbolEntity( sym4.get() );
+  s.addEntity( u"symbolD"_s, &symbolEntity, true );
+
+  QCOMPARE( s.allNames( QgsStyle::SymbolEntity ), QStringList() << u"symbolA"_s << u"symbolB"_s << u"symbolC"_s << u"symbolD"_s );
+}
+
+bool TestStyle::imageCheck( QgsMapSettings &ms, const QString &testName )
+{
+  QgsMultiRenderChecker checker;
+  ms.setOutputDpi( 96 );
+  checker.setControlName( "expected_" + testName );
+  checker.setMapSettings( ms );
+  const bool result = checker.runTest( testName, 0 );
+  mReport += checker.report();
+  return result;
+}
+
+bool TestStyle::testValidColor( QgsColorRamp *ramp, double value, const QColor &expected )
+{
+  const QColor result = ramp->color( value );
+  //use int color components when testing (builds some fuzziness into test)
+  if ( result.red() != expected.red() || result.green() != expected.green() || result.blue() != expected.blue() || result.alpha() != expected.alpha() )
+  {
+    QWARN( QString( "value = %1 result = %2 expected = %3" ).arg( value ).arg( result.name(), expected.name() ).toLocal8Bit().data() );
+    return false;
+  }
+  return true;
+}
+
+void TestStyle::testCreateColorRamps()
+{
+  // gradient ramp
+  QgsGradientColorRamp *gradientRamp = new QgsGradientColorRamp( QColor( Qt::red ), QColor( Qt::blue ) );
+  QgsGradientStopsList stops;
+  stops.append( QgsGradientStop( 0.5, QColor( Qt::white ) ) );
+  gradientRamp->setStops( stops );
+  QVERIFY( mStyle->addColorRamp( "test_gradient", gradientRamp, true ) );
+
+  // random ramp
+  QgsLimitedRandomColorRamp *randomRamp = new QgsLimitedRandomColorRamp();
+  QVERIFY( mStyle->addColorRamp( "test_random", randomRamp, true ) );
+
+  // color brewer ramp
+  QgsColorBrewerColorRamp *cb1Ramp = new QgsColorBrewerColorRamp();
+  QVERIFY( mStyle->addColorRamp( "test_cb1", cb1Ramp, true ) );
+  QgsColorBrewerColorRamp *cb2Ramp = new QgsColorBrewerColorRamp( u"RdYlGn"_s, 6 );
+  QVERIFY( mStyle->addColorRamp( "test_cb2", cb2Ramp, true ) );
+
+  // discrete ramp with no variant
+  QgsCptCityColorRamp *cc1Ramp = new QgsCptCityColorRamp( u"cb/seq/PuBuGn_06"_s, QString() );
+  QVERIFY( mStyle->addColorRamp( "test_cc1", cc1Ramp, true ) );
+  // discrete ramp with variant
+  QgsCptCityColorRamp *cc2Ramp = new QgsCptCityColorRamp( u"cb/div/PiYG"_s, u"_10"_s );
+  QVERIFY( mStyle->addColorRamp( "test_cc2", cc2Ramp, true ) );
+  // continuous ramp
+  QgsCptCityColorRamp *cc3Ramp = new QgsCptCityColorRamp( u"grass/byr"_s, QString() );
+  QVERIFY( mStyle->addColorRamp( "test_cc3", cc3Ramp, true ) );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::ColorrampEntity ), QStringList() << u"test_cb1"_s << u"test_cb2"_s << u"test_cc1"_s << u"test_cc2"_s << u"test_cc3"_s << u"test_gradient"_s << u"test_random"_s );
+
+  const std::unique_ptr<QgsCptCityColorRamp> cc4Ramp = std::make_unique<QgsCptCityColorRamp>( u"grass/byr"_s, QString() );
+  QgsStyleColorRampEntity entity( cc4Ramp.get() );
+  QVERIFY( mStyle->addEntity( "test_cc4", &entity, true ) );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::ColorrampEntity ), QStringList() << u"test_cb1"_s << u"test_cb2"_s << u"test_cc1"_s << u"test_cc2"_s << u"test_cc3"_s << u"test_cc4"_s << u"test_gradient"_s << u"test_random"_s );
+}
+
+void TestStyle::testCreateTextFormats()
+{
+  QVERIFY( mStyle->textFormatNames().isEmpty() );
+  QCOMPARE( mStyle->textFormatCount(), 0 );
+  // non existent format, should be default
+  QCOMPARE( mStyle->textFormat( QString( "blah" ) ).color().name(), u"#000000"_s );
+
+  const QSignalSpy spy( mStyle, &QgsStyle::textFormatAdded );
+  const QSignalSpy spyChanged( mStyle, &QgsStyle::textFormatChanged );
+  // add a format
+  QgsTextFormat format;
+  format.setColor( QColor( 255, 0, 0 ) );
+  QVERIFY( mStyle->addTextFormat( "test_format", format, true ) );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 0 );
+
+  QVERIFY( mStyle->textFormatNames().contains( u"test_format"_s ) );
+  QCOMPARE( mStyle->textFormatCount(), 1 );
+  QCOMPARE( mStyle->textFormat( QString( "test_format" ) ).color().name(), u"#ff0000"_s );
+
+  format.setColor( QColor( 255, 255, 0 ) );
+  QVERIFY( mStyle->addTextFormat( "test_format", format, true ) );
+  QVERIFY( mStyle->textFormatNames().contains( u"test_format"_s ) );
+  QCOMPARE( mStyle->textFormatCount(), 1 );
+  QCOMPARE( mStyle->textFormat( QString( "test_format" ) ).color().name(), u"#ffff00"_s );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  format.setColor( QColor( 255, 255, 255 ) );
+  QVERIFY( mStyle->addTextFormat( "test_format2", format, true ) );
+  QVERIFY( mStyle->textFormatNames().contains( u"test_format2"_s ) );
+  QCOMPARE( mStyle->textFormatCount(), 2 );
+  QCOMPARE( mStyle->textFormat( QString( "test_format" ) ).color().name(), u"#ffff00"_s );
+  QCOMPARE( mStyle->textFormat( QString( "test_format2" ) ).color().name(), u"#ffffff"_s );
+  QCOMPARE( spy.count(), 2 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  // save and restore
+  QVERIFY( mStyle->exportXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QgsStyle style2;
+  QVERIFY( style2.importXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QVERIFY( style2.textFormatNames().contains( u"test_format"_s ) );
+  QVERIFY( style2.textFormatNames().contains( u"test_format2"_s ) );
+  QCOMPARE( style2.textFormatCount(), 2 );
+  QCOMPARE( style2.textFormat( QString( "test_format" ) ).color().name(), u"#ffff00"_s );
+  QCOMPARE( style2.textFormat( QString( "test_format2" ) ).color().name(), u"#ffffff"_s );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::TextFormatEntity ), QStringList() << u"test_format"_s << u"test_format2"_s );
+
+
+  format.setColor( QColor( 255, 255, 205 ) );
+  QgsStyleTextFormatEntity entity( format );
+  QVERIFY( mStyle->addEntity( "test_format4", &entity, true ) );
+  QVERIFY( mStyle->textFormatNames().contains( u"test_format4"_s ) );
+}
+
+void TestStyle::testCreateLabelSettings()
+{
+  QVERIFY( mStyle->labelSettingsNames().isEmpty() );
+  QCOMPARE( mStyle->labelSettingsCount(), 0 );
+  // non existent settings, should be default
+  QVERIFY( mStyle->labelSettings( QString( "blah" ) ).fieldName.isEmpty() );
+
+  const QSignalSpy spy( mStyle, &QgsStyle::labelSettingsAdded );
+  const QSignalSpy spyChanged( mStyle, &QgsStyle::labelSettingsChanged );
+  // add settings
+  QgsPalLayerSettings settings;
+  settings.fieldName = u"a_field_of_dreams"_s;
+  QVERIFY( mStyle->addLabelSettings( "test_settings", settings, true ) );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 0 );
+
+  QVERIFY( mStyle->labelSettingsNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->labelSettingsCount(), 1 );
+  QCOMPARE( mStyle->labelSettings( QString( "test_settings" ) ).fieldName, u"a_field_of_dreams"_s );
+
+  settings.fieldName = u"actually_no_its_a_nightmare"_s;
+  QVERIFY( mStyle->addLabelSettings( "test_settings", settings, true ) );
+  QVERIFY( mStyle->labelSettingsNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->labelSettingsCount(), 1 );
+  QCOMPARE( mStyle->labelSettings( QString( "test_settings" ) ).fieldName, u"actually_no_its_a_nightmare"_s );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  settings.fieldName = u"phew_it_was_just_a_dream_all_along"_s;
+  QVERIFY( mStyle->addLabelSettings( "test_format2", settings, true ) );
+  QVERIFY( mStyle->labelSettingsNames().contains( u"test_format2"_s ) );
+  QCOMPARE( mStyle->labelSettingsCount(), 2 );
+  QCOMPARE( mStyle->labelSettings( QString( "test_settings" ) ).fieldName, u"actually_no_its_a_nightmare"_s );
+  QCOMPARE( mStyle->labelSettings( QString( "test_format2" ) ).fieldName, u"phew_it_was_just_a_dream_all_along"_s );
+  QCOMPARE( spy.count(), 2 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  // save and restore
+  QVERIFY( mStyle->exportXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QgsStyle style2;
+  QVERIFY( style2.importXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QVERIFY( style2.labelSettingsNames().contains( u"test_settings"_s ) );
+  QVERIFY( style2.labelSettingsNames().contains( u"test_format2"_s ) );
+  QCOMPARE( style2.labelSettingsCount(), 2 );
+  QCOMPARE( style2.labelSettings( QString( "test_settings" ) ).fieldName, u"actually_no_its_a_nightmare"_s );
+  QCOMPARE( style2.labelSettings( QString( "test_format2" ) ).fieldName, u"phew_it_was_just_a_dream_all_along"_s );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::LabelSettingsEntity ), QStringList() << u"test_format2"_s << u"test_settings"_s );
+
+  QgsStyleLabelSettingsEntity entity( settings );
+  QVERIFY( mStyle->addEntity( "test_settings2", &entity, true ) );
+  QVERIFY( mStyle->labelSettingsNames().contains( u"test_settings2"_s ) );
+}
+
+void TestStyle::testCreateLegendPatchShapes()
+{
+  QVERIFY( mStyle->legendPatchShapeNames().isEmpty() );
+  QCOMPARE( mStyle->legendPatchShapesCount(), 0 );
+  // non existent settings, should be default
+  QVERIFY( mStyle->legendPatchShape( QString( "blah" ) ).isNull() );
+
+  const QSignalSpy spy( mStyle, &QgsStyle::entityAdded );
+  const QSignalSpy spyChanged( mStyle, &QgsStyle::entityChanged );
+  // add settings
+  QgsLegendPatchShape settings;
+  settings.setGeometry( QgsGeometry::fromWkt( u"Point ( 5 6 )"_s ) );
+  QVERIFY( mStyle->addLegendPatchShape( "test_settings", settings, true ) );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 0 );
+
+  QVERIFY( mStyle->legendPatchShapeNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->legendPatchShapesCount(), 1 );
+  QCOMPARE( mStyle->legendPatchShape( QString( "test_settings" ) ).geometry().asWkt(), u"Point (5 6)"_s );
+
+  settings.setGeometry( QgsGeometry::fromWkt( u"Point ( 15 16 )"_s ) );
+  QVERIFY( mStyle->addLegendPatchShape( "test_settings", settings, true ) );
+  QVERIFY( mStyle->legendPatchShapeNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->legendPatchShapesCount(), 1 );
+  QCOMPARE( mStyle->legendPatchShape( QString( "test_settings" ) ).geometry().asWkt(), u"Point (15 16)"_s );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  settings.setGeometry( QgsGeometry::fromWkt( u"Point ( 25 26 )"_s ) );
+  QVERIFY( mStyle->addLegendPatchShape( "test_format2", settings, true ) );
+  QVERIFY( mStyle->legendPatchShapeNames().contains( u"test_format2"_s ) );
+  QCOMPARE( mStyle->legendPatchShapesCount(), 2 );
+  QCOMPARE( mStyle->legendPatchShape( QString( "test_settings" ) ).geometry().asWkt(), u"Point (15 16)"_s );
+  QCOMPARE( mStyle->legendPatchShape( QString( "test_format2" ) ).geometry().asWkt(), u"Point (25 26)"_s );
+  QCOMPARE( spy.count(), 2 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  // save and restore
+  QVERIFY( mStyle->exportXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QgsStyle style2;
+  QVERIFY( style2.importXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QVERIFY( style2.legendPatchShapeNames().contains( u"test_settings"_s ) );
+  QVERIFY( style2.legendPatchShapeNames().contains( u"test_format2"_s ) );
+  QCOMPARE( style2.legendPatchShapesCount(), 2 );
+  QCOMPARE( style2.legendPatchShape( QString( "test_settings" ) ).geometry().asWkt(), u"Point (15 16)"_s );
+  QCOMPARE( style2.legendPatchShape( QString( "test_format2" ) ).geometry().asWkt(), u"Point (25 26)"_s );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::LegendPatchShapeEntity ), QStringList() << u"test_format2"_s << u"test_settings"_s );
+
+  QgsStyleLegendPatchShapeEntity entity( settings );
+  QVERIFY( mStyle->addEntity( "test_settings2", &entity, true ) );
+  QVERIFY( mStyle->legendPatchShapeNames().contains( u"test_settings2"_s ) );
+}
+
+void TestStyle::testCreate3dSymbol()
+{
+  QVERIFY( mStyle->symbol3DNames().isEmpty() );
+  QCOMPARE( mStyle->symbol3DCount(), 0 );
+  // non existent settings, should be default
+  QVERIFY( !mStyle->symbol3D( QString( "blah" ) ) );
+  QVERIFY( mStyle->symbol3DCompatibleGeometryTypes( u"blah"_s ).isEmpty() );
+
+  const QSignalSpy spy( mStyle, &QgsStyle::entityAdded );
+  const QSignalSpy spyChanged( mStyle, &QgsStyle::entityChanged );
+  // add symbol
+  Dummy3DSymbol symbol;
+  symbol.id = u"xxx"_s;
+  QVERIFY( mStyle->addSymbol3D( "test_settings", symbol.clone(), true ) );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 0 );
+
+  QVERIFY( mStyle->symbol3DNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->symbol3DCount(), 1 );
+  QVERIFY( mStyle->symbol3DCompatibleGeometryTypes( u"blah"_s ).isEmpty() );
+  QCOMPARE( mStyle->symbol3DCompatibleGeometryTypes( u"test_settings"_s ), QList<Qgis::GeometryType>() << Qgis::GeometryType::Point << Qgis::GeometryType::Line );
+  std::unique_ptr<Dummy3DSymbol> retrieved( dynamic_cast<Dummy3DSymbol *>( mStyle->symbol3D( u"test_settings"_s ) ) );
+  QCOMPARE( retrieved->id, u"xxx"_s );
+  symbol.id = u"yyy"_s;
+  QVERIFY( mStyle->addSymbol3D( "test_settings", symbol.clone(), true ) );
+  QVERIFY( mStyle->symbol3DNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->symbol3DCount(), 1 );
+  retrieved.reset( dynamic_cast<Dummy3DSymbol *>( mStyle->symbol3D( u"test_settings"_s ) ) );
+  QCOMPARE( retrieved->id, u"yyy"_s );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  symbol.id = u"zzz"_s;
+  QVERIFY( mStyle->addSymbol3D( "test_format2", symbol.clone(), true ) );
+  QVERIFY( mStyle->symbol3DNames().contains( u"test_format2"_s ) );
+  QCOMPARE( mStyle->symbol3DCount(), 2 );
+  retrieved.reset( dynamic_cast<Dummy3DSymbol *>( mStyle->symbol3D( u"test_settings"_s ) ) );
+  QCOMPARE( retrieved->id, u"yyy"_s );
+  retrieved.reset( dynamic_cast<Dummy3DSymbol *>( mStyle->symbol3D( u"test_format2"_s ) ) );
+  QCOMPARE( retrieved->id, u"zzz"_s );
+  QCOMPARE( spy.count(), 2 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  // save and restore
+  QVERIFY( mStyle->exportXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QgsStyle style2;
+  QVERIFY( style2.importXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QVERIFY( style2.symbol3DNames().contains( u"test_settings"_s ) );
+  QVERIFY( style2.symbol3DNames().contains( u"test_format2"_s ) );
+  QCOMPARE( style2.symbol3DCount(), 2 );
+  retrieved.reset( dynamic_cast<Dummy3DSymbol *>( style2.symbol3D( u"test_settings"_s ) ) );
+  QCOMPARE( retrieved->id, u"yyy"_s );
+  retrieved.reset( dynamic_cast<Dummy3DSymbol *>( style2.symbol3D( u"test_format2"_s ) ) );
+  QCOMPARE( retrieved->id, u"zzz"_s );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::Symbol3DEntity ), QStringList() << u"test_format2"_s << u"test_settings"_s );
+
+  QgsStyleSymbol3DEntity entity( &symbol );
+  QVERIFY( mStyle->addEntity( "test_settings2", &entity, true ) );
+  QVERIFY( mStyle->symbol3DNames().contains( u"test_settings2"_s ) );
+}
+
+void TestStyle::testCreateMaterialSettings()
+{
+  QVERIFY( mStyle->materialSettingsNames().isEmpty() );
+  QCOMPARE( mStyle->materialSettingsCount(), 0 );
+  // non existent settings, should be default
+  QVERIFY( !mStyle->materialSettings( QString( "blah" ) ) );
+
+  const QSignalSpy spy( mStyle, &QgsStyle::entityAdded );
+  const QSignalSpy spyChanged( mStyle, &QgsStyle::entityChanged );
+
+  // add material
+  QgsGoochMaterialSettings settings;
+  settings.setWarm( QColor( 0, 0, 255 ) );
+  QVERIFY( mStyle->addMaterialSettings( "test_settings", settings.clone(), true ) );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 0 );
+
+  QVERIFY( mStyle->materialSettingsNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->materialSettingsCount(), 1 );
+  std::unique_ptr<QgsGoochMaterialSettings> retrieved( dynamic_cast<QgsGoochMaterialSettings *>( mStyle->materialSettings( u"test_settings"_s ).release() ) );
+  QCOMPARE( retrieved->warm().name(), u"#0000ff"_s );
+
+  settings.setWarm( QColor( 0, 255, 255 ) );
+  QVERIFY( mStyle->addMaterialSettings( "test_settings", settings.clone(), true ) );
+  QVERIFY( mStyle->materialSettingsNames().contains( u"test_settings"_s ) );
+  QCOMPARE( mStyle->materialSettingsCount(), 1 );
+  retrieved.reset( dynamic_cast<QgsGoochMaterialSettings *>( mStyle->materialSettings( u"test_settings"_s ).release() ) );
+  QCOMPARE( retrieved->warm().name(), u"#00ffff"_s );
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  QgsPhongMaterialSettings phong;
+  phong.setAmbient( QColor( 0, 155, 255 ) );
+  QVERIFY( mStyle->addMaterialSettings( "test_format2", phong.clone(), true ) );
+  QVERIFY( mStyle->materialSettingsNames().contains( u"test_format2"_s ) );
+  QCOMPARE( mStyle->materialSettingsCount(), 2 );
+  retrieved.reset( dynamic_cast<QgsGoochMaterialSettings *>( mStyle->materialSettings( u"test_settings"_s ).release() ) );
+  QCOMPARE( retrieved->warm().name(), u"#00ffff"_s );
+  std::unique_ptr<QgsPhongMaterialSettings> retrieved2( dynamic_cast<QgsPhongMaterialSettings *>( mStyle->materialSettings( u"test_format2"_s ).release() ) );
+  QCOMPARE( retrieved2->ambient().name(), u"#009bff"_s );
+  QCOMPARE( spy.count(), 2 );
+  QCOMPARE( spyChanged.count(), 1 );
+
+  // save and restore
+  QVERIFY( mStyle->exportXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QgsStyle style2;
+  QVERIFY( style2.importXml( QDir::tempPath() + "/text_style.xml" ) );
+
+  QVERIFY( style2.materialSettingsNames().contains( u"test_settings"_s ) );
+  QVERIFY( style2.materialSettingsNames().contains( u"test_format2"_s ) );
+  QCOMPARE( style2.materialSettingsCount(), 2 );
+  retrieved.reset( dynamic_cast<QgsGoochMaterialSettings *>( style2.materialSettings( u"test_settings"_s ).release() ) );
+  QCOMPARE( retrieved->warm().name(), u"#00ffff"_s );
+  retrieved2.reset( dynamic_cast<QgsPhongMaterialSettings *>( style2.materialSettings( u"test_format2"_s ).release() ) );
+  QCOMPARE( retrieved2->ambient().name(), u"#009bff"_s );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::MaterialSettingsEntity ), QStringList() << u"test_format2"_s << u"test_settings"_s );
+
+  QgsStyleMaterialSettingsEntity entity( &settings );
+  QVERIFY( mStyle->addEntity( "test_settings2", &entity, true ) );
+  QVERIFY( mStyle->materialSettingsNames().contains( u"test_settings2"_s ) );
+}
+
+void TestStyle::testLoadColorRamps()
+{
+  const QStringList colorRamps = mStyle->colorRampNames();
+  QStringList colorRampsTest = QStringList() << u"test_gradient"_s << u"test_random"_s << u"test_cb1"_s << u"test_cb2"_s;
+
+  // values for color tests
+  QMultiMap<QString, QPair<double, QColor>> colorTests;
+  colorTests.insert( u"test_gradient"_s, qMakePair( 0, QColor( "#ff0000" ) ) );
+  colorTests.insert( u"test_gradient"_s, qMakePair( 1, QColor( "#0000ff" ) ) );
+  // cannot test random colors!
+  colorTests.insert( u"test_cb1"_s, qMakePair( 0, QColor( "#d7191c" ) ) );
+  colorTests.insert( u"test_cb1"_s, qMakePair( 1, QColor( "#2b83ba" ) ) );
+  colorTests.insert( u"test_cb2"_s, qMakePair( 0, QColor( "#d73027" ) ) );
+  colorTests.insert( u"test_cb2"_s, qMakePair( 1, QColor( "#1a9850" ) ) );
+
+  // cpt-city
+  colorRampsTest << u"test_cc1"_s;
+  colorTests.insert( u"test_cc1"_s, qMakePair( 0, QColor( "#f6eff7" ) ) );
+  colorTests.insert( u"test_cc1"_s, qMakePair( 1, QColor( "#016c59" ) ) );
+  colorRampsTest << u"test_cc2"_s;
+  colorTests.insert( u"test_cc2"_s, qMakePair( 0, QColor( "#8e0152" ) ) );
+  colorTests.insert( u"test_cc2"_s, qMakePair( 1, QColor( "#276419" ) ) );
+  colorRampsTest << u"test_cc3"_s;
+  colorTests.insert( u"test_cc3"_s, qMakePair( 0, QColor( "#0000ff" ) ) );
+  colorTests.insert( u"test_cc3"_s, qMakePair( 1, QColor( "#ff0000" ) ) );
+
+  QgsDebugMsgLevel( u"loaded colorRamps: "_s + colorRamps.join( ' ' ), 1 );
+
+  for ( const QString &name : colorRampsTest )
+  {
+    QgsDebugMsgLevel( "colorRamp " + name, 1 );
+    QVERIFY( colorRamps.contains( name ) );
+    QgsColorRamp *ramp = mStyle->colorRamp( name );
+    QVERIFY( ramp != nullptr );
+    // test colors
+    if ( colorTests.contains( name ) )
+    {
+      const QList<QPair<double, QColor>> values = colorTests.values( name );
+      for ( int i = 0; i < values.size(); ++i )
+      {
+        QVERIFY( testValidColor( ramp, values.at( i ).first, values.at( i ).second ) );
+      }
+    }
+    if ( ramp )
+      delete ramp;
+  }
+}
+
+void TestStyle::testSaveLoad()
+{
+  // basic test to see that ramp is present
+  const QStringList colorRamps = mStyle->colorRampNames();
+  QgsDebugMsgLevel( "loaded colorRamps: " + colorRamps.join( " " ), 1 );
+
+  const QStringList colorRampsTest = QStringList() << u"test_gradient"_s;
+
+  for ( const QString &name : colorRampsTest )
+  {
+    QgsDebugMsgLevel( "colorRamp " + name, 1 );
+    QVERIFY( colorRamps.contains( name ) );
+    QgsColorRamp *ramp = mStyle->colorRamp( name );
+    QVERIFY( ramp != nullptr );
+    if ( ramp )
+      delete ramp;
+  }
+  // test content again
+  testLoadColorRamps();
+}
+
+void TestStyle::testFavorites()
+{
+  // save initial number of favorites to compare against additions / subtractions
+  QStringList favorites;
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::SymbolEntity );
+  const int count = favorites.count();
+
+  QVERIFY( !mStyle->isFavorite( QgsStyle::SymbolEntity, u"AaaaaaaaaA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::TextFormatEntity, u"AaaaaaaaaA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::LabelSettingsEntity, u"AaaaaaaaaA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::ColorrampEntity, u"AaaaaaaaaA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::LegendPatchShapeEntity, u"AaaaaaaaaA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::Symbol3DEntity, u"AaaaaaaaaA"_s ) );
+
+  // add some symbols to favorites
+  const std::unique_ptr<QgsMarkerSymbol> sym1( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  const std::unique_ptr<QgsMarkerSymbol> sym2( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  const std::unique_ptr<QgsMarkerSymbol> sym3( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  mStyle->saveSymbol( u"symbolA"_s, sym1.get(), true, QStringList() );
+  mStyle->saveSymbol( u"symbolB"_s, sym2.get(), false, QStringList() );
+  mStyle->saveSymbol( u"symbolC"_s, sym3.get(), true, QStringList() );
+
+  QVERIFY( mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolB"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolC"_s ) );
+
+  // check for added symbols to favorites
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::SymbolEntity );
+  QCOMPARE( favorites.count(), count + 2 );
+  QVERIFY( favorites.contains( u"symbolA"_s ) );
+  QVERIFY( favorites.contains( u"symbolC"_s ) );
+
+  const QSignalSpy favoriteChangedSpy( mStyle, &QgsStyle::favoritedChanged );
+
+  // remove one symbol from favorites
+  mStyle->removeFavorite( QgsStyle::SymbolEntity, u"symbolA"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 1 );
+  QCOMPARE( favoriteChangedSpy.at( 0 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 0 ).at( 1 ).toString(), u"symbolA"_s );
+  QCOMPARE( favoriteChangedSpy.at( 0 ).at( 2 ).toBool(), false );
+
+  QVERIFY( !mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolB"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolC"_s ) );
+
+  // insure favorites updated after removal
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::SymbolEntity );
+  QCOMPARE( favorites.count(), count + 1 );
+  QVERIFY( favorites.contains( "symbolC" ) );
+
+  mStyle->addFavorite( QgsStyle::SymbolEntity, u"symbolA"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 2 );
+  QCOMPARE( favoriteChangedSpy.at( 1 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 1 ).at( 1 ).toString(), u"symbolA"_s );
+  QCOMPARE( favoriteChangedSpy.at( 1 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::SymbolEntity );
+  QCOMPARE( favorites.count(), count + 2 );
+  QVERIFY( favorites.contains( "symbolA" ) );
+
+  QVERIFY( mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolA"_s ) );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolB"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::SymbolEntity, u"symbolC"_s ) );
+
+  QgsGradientColorRamp *gradientRamp = new QgsGradientColorRamp( QColor( Qt::red ), QColor( Qt::blue ) );
+  QVERIFY( mStyle->addColorRamp( "gradient_1", gradientRamp, true ) );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::ColorrampEntity );
+  QCOMPARE( favorites.count(), 0 );
+
+  QVERIFY( !mStyle->isFavorite( QgsStyle::ColorrampEntity, u"gradient_1"_s ) );
+
+  mStyle->addFavorite( QgsStyle::ColorrampEntity, u"gradient_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 3 );
+  QCOMPARE( favoriteChangedSpy.at( 2 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 2 ).at( 1 ).toString(), u"gradient_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 2 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::ColorrampEntity );
+  QCOMPARE( favorites.count(), 1 );
+  QVERIFY( favorites.contains( "gradient_1" ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::ColorrampEntity, u"gradient_1"_s ) );
+
+  mStyle->removeFavorite( QgsStyle::ColorrampEntity, u"gradient_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 4 );
+  QCOMPARE( favoriteChangedSpy.at( 3 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 3 ).at( 1 ).toString(), u"gradient_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 3 ).at( 2 ).toBool(), false );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::ColorrampEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::ColorrampEntity, u"gradient_1"_s ) );
+
+  // text formats
+  const QgsTextFormat format1;
+  QVERIFY( mStyle->addTextFormat( u"format_1"_s, format1, true ) );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::TextFormatEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::TextFormatEntity, u"format_1"_s ) );
+
+  mStyle->addFavorite( QgsStyle::TextFormatEntity, u"format_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 5 );
+  QCOMPARE( favoriteChangedSpy.at( 4 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 4 ).at( 1 ).toString(), u"format_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 4 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::TextFormatEntity );
+  QCOMPARE( favorites.count(), 1 );
+  QVERIFY( favorites.contains( u"format_1"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::TextFormatEntity, u"format_1"_s ) );
+
+  mStyle->removeFavorite( QgsStyle::TextFormatEntity, u"format_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 6 );
+  QCOMPARE( favoriteChangedSpy.at( 5 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 5 ).at( 1 ).toString(), u"format_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 5 ).at( 2 ).toBool(), false );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::TextFormatEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::TextFormatEntity, u"format_1"_s ) );
+
+  // label settings
+  const QgsPalLayerSettings settings1;
+  QVERIFY( mStyle->addLabelSettings( u"settings_1"_s, settings1, true ) );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::LabelSettingsEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::LabelSettingsEntity, u"settings_1"_s ) );
+
+  mStyle->addFavorite( QgsStyle::LabelSettingsEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 7 );
+  QCOMPARE( favoriteChangedSpy.at( 6 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 6 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 6 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::LabelSettingsEntity );
+  QCOMPARE( favorites.count(), 1 );
+  QVERIFY( favorites.contains( u"settings_1"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::LabelSettingsEntity, u"settings_1"_s ) );
+
+  mStyle->removeFavorite( QgsStyle::LabelSettingsEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 8 );
+  QCOMPARE( favoriteChangedSpy.at( 7 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 7 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 7 ).at( 2 ).toBool(), false );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::LabelSettingsEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::LabelSettingsEntity, u"settings_1"_s ) );
+
+  // legend patch shapes
+  const QgsLegendPatchShape shape1;
+  QVERIFY( mStyle->addLegendPatchShape( u"settings_1"_s, shape1, true ) );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::LegendPatchShapeEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::LegendPatchShapeEntity, u"settings_1"_s ) );
+
+  mStyle->addFavorite( QgsStyle::LegendPatchShapeEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 9 );
+  QCOMPARE( favoriteChangedSpy.at( 8 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 8 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 8 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::LegendPatchShapeEntity );
+  QCOMPARE( favorites.count(), 1 );
+  QVERIFY( favorites.contains( u"settings_1"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::LegendPatchShapeEntity, u"settings_1"_s ) );
+
+  mStyle->removeFavorite( QgsStyle::LegendPatchShapeEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 10 );
+  QCOMPARE( favoriteChangedSpy.at( 9 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 9 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 9 ).at( 2 ).toBool(), false );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::LegendPatchShapeEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::LegendPatchShapeEntity, u"settings_1"_s ) );
+
+  // symbol 3d
+  const Dummy3DSymbol symbol3d1;
+  QVERIFY( mStyle->addSymbol3D( u"settings_1"_s, symbol3d1.clone(), true ) );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::Symbol3DEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::Symbol3DEntity, u"settings_1"_s ) );
+
+  mStyle->addFavorite( QgsStyle::Symbol3DEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 11 );
+  QCOMPARE( favoriteChangedSpy.at( 10 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 10 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 10 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::Symbol3DEntity );
+  QCOMPARE( favorites.count(), 1 );
+  QVERIFY( favorites.contains( u"settings_1"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::Symbol3DEntity, u"settings_1"_s ) );
+
+  mStyle->removeFavorite( QgsStyle::Symbol3DEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 12 );
+  QCOMPARE( favoriteChangedSpy.at( 11 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 11 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 11 ).at( 2 ).toBool(), false );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::Symbol3DEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::Symbol3DEntity, u"settings_1"_s ) );
+
+  // material settings
+  const QgsGoochMaterialSettings materialSettings1;
+  QVERIFY( mStyle->addMaterialSettings( u"settings_1"_s, materialSettings1.clone(), true ) );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::MaterialSettingsEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::MaterialSettingsEntity, u"settings_1"_s ) );
+
+  mStyle->addFavorite( QgsStyle::MaterialSettingsEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 13 );
+  QCOMPARE( favoriteChangedSpy.at( 12 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 12 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 12 ).at( 2 ).toBool(), true );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::MaterialSettingsEntity );
+  QCOMPARE( favorites.count(), 1 );
+  QVERIFY( favorites.contains( u"settings_1"_s ) );
+  QVERIFY( mStyle->isFavorite( QgsStyle::MaterialSettingsEntity, u"settings_1"_s ) );
+
+  mStyle->removeFavorite( QgsStyle::MaterialSettingsEntity, u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.count(), 14 );
+  QCOMPARE( favoriteChangedSpy.at( 13 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( favoriteChangedSpy.at( 13 ).at( 1 ).toString(), u"settings_1"_s );
+  QCOMPARE( favoriteChangedSpy.at( 13 ).at( 2 ).toBool(), false );
+  favorites = mStyle->symbolsOfFavorite( QgsStyle::MaterialSettingsEntity );
+  QCOMPARE( favorites.count(), 0 );
+  QVERIFY( !mStyle->isFavorite( QgsStyle::MaterialSettingsEntity, u"settings_1"_s ) );
+}
+
+void TestStyle::testTags()
+{
+  //add some tags
+  int id = mStyle->addTag( u"red"_s );
+  QCOMPARE( id, mStyle->tagId( "red" ) );
+
+  id = mStyle->addTag( u"starry"_s );
+  QCOMPARE( id, mStyle->tagId( "starry" ) );
+  id = mStyle->addTag( u"circle"_s );
+  QCOMPARE( id, mStyle->tagId( "circle" ) );
+  id = mStyle->addTag( u"blue"_s );
+  QCOMPARE( id, mStyle->tagId( "blue" ) );
+  id = mStyle->addTag( u"purple"_s );
+
+  //check tagid and tag return values
+  QCOMPARE( id, mStyle->tagId( "purple" ) );
+  QCOMPARE( u"purple"_s, mStyle->tag( id ) );
+
+  QCOMPARE( mStyle->allNames( QgsStyle::TagEntity ), QStringList() << u"red"_s << u"starry"_s << u"circle"_s << u"blue"_s << u"purple"_s );
+
+  // Cyrillic
+  id = mStyle->addTag( u"МЕТЕОР"_s );
+  QCOMPARE( id, mStyle->tagId( "МЕТЕОР" ) );
+
+  QStringList tags = mStyle->tags();
+  QCOMPARE( tags.count(), 6 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "purple" ) );
+  QVERIFY( tags.contains( "МЕТЕОР" ) );
+
+  //remove tag
+  mStyle->remove( QgsStyle::TagEntity, mStyle->tagId( u"purple"_s ) );
+  mStyle->remove( QgsStyle::TagEntity, -999 ); //bad id
+  tags = mStyle->tags();
+  QCOMPARE( tags.count(), 5 );
+  QVERIFY( !tags.contains( "purple" ) );
+
+  //add some symbols
+  const std::unique_ptr<QgsMarkerSymbol> sym1( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym2( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym3( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym4( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  QVERIFY( mStyle->saveSymbol( "symbol1", sym1.get(), false, QStringList() << "red" << "starry" ) );
+  mStyle->addSymbol( u"blue starry"_s, sym2.release(), true );
+  mStyle->addSymbol( u"red circle"_s, sym3.release(), true );
+  mStyle->addSymbol( u"МЕТЕОР"_s, sym4.release(), true );
+
+  const QSignalSpy tagsChangedSpy( mStyle, &QgsStyle::entityTagsChanged );
+
+  //tag them
+  QVERIFY( mStyle->tagSymbol( QgsStyle::SymbolEntity, "blue starry", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 1 );
+  QCOMPARE( tagsChangedSpy.at( 0 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 0 ).at( 1 ).toString(), u"blue starry"_s );
+  QCOMPARE( tagsChangedSpy.at( 0 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::SymbolEntity, "red circle", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 2 );
+  QCOMPARE( tagsChangedSpy.at( 1 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 1 ).at( 1 ).toString(), u"red circle"_s );
+  QCOMPARE( tagsChangedSpy.at( 1 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad symbol name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::SymbolEntity, "no symbol", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 2 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::SymbolEntity, "red circle", QStringList() << "round" ) );
+  QCOMPARE( tagsChangedSpy.count(), 3 );
+  QCOMPARE( tagsChangedSpy.at( 2 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 2 ).at( 1 ).toString(), u"red circle"_s );
+  QCOMPARE( tagsChangedSpy.at( 2 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"round"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( "round" ) );
+
+  // Cyrillic
+  // Add twice (see issue #18281)
+  QVERIFY( mStyle->tagSymbol( QgsStyle::SymbolEntity, "МЕТЕОР", QStringList() << "МЕТЕОР" ) );
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( "МЕТЕОР" ) );
+  QCOMPARE( tags.filter( "МЕТЕОР" ).count(), 1 );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::SymbolEntity, u"blue starry"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::SymbolEntity, u"red circle"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "round" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::SymbolEntity, u"symbol1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "starry" ) );
+
+  tags = mStyle->tagsOfSymbol( QgsStyle::SymbolEntity, u"МЕТЕОР"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "МЕТЕОР" ) );
+
+  //check that a given tag is attached to a symbol
+  QVERIFY( mStyle->symbolHasTag( QgsStyle::SymbolEntity, u"blue starry"_s, u"blue"_s ) );
+  QVERIFY( mStyle->symbolHasTag( QgsStyle::SymbolEntity, u"МЕТЕОР"_s, u"МЕТЕОР"_s ) );
+
+  //check that a given tag is not attached to a symbol
+  QCOMPARE( false, mStyle->symbolHasTag( QgsStyle::SymbolEntity, u"blue starry"_s, u"notblue"_s ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::SymbolEntity, "blue starry", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::SymbolEntity, u"blue starry"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 5 );
+  QCOMPARE( tagsChangedSpy.at( 4 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 4 ).at( 1 ).toString(), u"blue starry"_s );
+  QCOMPARE( tagsChangedSpy.at( 4 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::SymbolEntity, u"blue starry"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::SymbolEntity, u"blue starry"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 6 );
+  QCOMPARE( tagsChangedSpy.at( 5 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::SymbolEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 5 ).at( 1 ).toString(), u"blue starry"_s );
+  QCOMPARE( tagsChangedSpy.at( 5 ).at( 2 ).toStringList(), QStringList() );
+
+  //try to remove tag from non-existing symbol
+  QVERIFY( !mStyle->detagSymbol( QgsStyle::SymbolEntity, "no symbol!", QStringList() << "bad" << "blue" ) );
+  QCOMPARE( tagsChangedSpy.count(), 6 );
+
+  mStyle->tagSymbol( QgsStyle::SymbolEntity, "blue starry", QStringList() << u"starry"_s );
+
+  //check symbols with tag
+  QStringList symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"red"_s ) );
+  QCOMPARE( symbols.count(), 2 );
+  QVERIFY( symbols.contains( "symbol1" ) );
+  QVERIFY( symbols.contains( "red circle" ) );
+  symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"starry"_s ) );
+  QCOMPARE( symbols.count(), 2 );
+  QVERIFY( symbols.contains( "symbol1" ) );
+  QVERIFY( symbols.contains( "blue starry" ) );
+  symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"circle"_s ) );
+  QCOMPARE( symbols.count(), 1 );
+  QVERIFY( symbols.contains( "red circle" ) );
+  symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"round"_s ) );
+  QCOMPARE( symbols.count(), 1 );
+  symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"МЕТЕОР"_s ) );
+  QCOMPARE( symbols.count(), 1 );
+  QVERIFY( symbols.contains( "МЕТЕОР" ) );
+  symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"blue"_s ) );
+  QVERIFY( symbols.isEmpty() );
+  symbols = mStyle->symbolsWithTag( QgsStyle::SymbolEntity, mStyle->tagId( u"no tag"_s ) );
+  QVERIFY( symbols.isEmpty() );
+
+  //searching returns symbols with matching tags
+  symbols = mStyle->findSymbols( QgsStyle::SymbolEntity, u"red"_s );
+  QCOMPARE( symbols.count(), 2 );
+  QVERIFY( symbols.contains( "symbol1" ) );
+  QVERIFY( symbols.contains( "red circle" ) );
+  symbols = mStyle->findSymbols( QgsStyle::SymbolEntity, u"symbol1"_s );
+  QCOMPARE( symbols.count(), 1 );
+  QVERIFY( symbols.contains( "symbol1" ) );
+  symbols = mStyle->findSymbols( QgsStyle::SymbolEntity, u"starry"_s );
+  QCOMPARE( symbols.count(), 2 );
+  QVERIFY( symbols.contains( "symbol1" ) );
+  QVERIFY( symbols.contains( "blue starry" ) );
+  symbols = mStyle->findSymbols( QgsStyle::SymbolEntity, u"blue"_s );
+  QCOMPARE( symbols.count(), 1 );
+  QVERIFY( symbols.contains( "blue starry" ) );
+  symbols = mStyle->findSymbols( QgsStyle::SymbolEntity, u"round"_s );
+  QCOMPARE( symbols.count(), 1 );
+  QVERIFY( symbols.contains( "red circle" ) );
+  symbols = mStyle->findSymbols( QgsStyle::SymbolEntity, u"МЕТЕОР"_s );
+  QCOMPARE( symbols.count(), 1 );
+  QVERIFY( symbols.contains( "МЕТЕОР" ) );
+
+  // tag ramp
+  QgsGradientColorRamp *gradientRamp = new QgsGradientColorRamp( QColor( Qt::red ), QColor( Qt::blue ) );
+  QVERIFY( mStyle->addColorRamp( "gradient_tag1", gradientRamp, true ) );
+  QgsGradientColorRamp *gradientRamp2 = new QgsGradientColorRamp( QColor( Qt::red ), QColor( Qt::blue ) );
+  QVERIFY( mStyle->addColorRamp( "gradient_tag2", gradientRamp2, true ) );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::ColorrampEntity, "gradient_tag1", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 10 );
+  QCOMPARE( tagsChangedSpy.at( 9 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 9 ).at( 1 ).toString(), u"gradient_tag1"_s );
+  QCOMPARE( tagsChangedSpy.at( 9 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::ColorrampEntity, "gradient_tag2", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 11 );
+  QCOMPARE( tagsChangedSpy.at( 10 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 10 ).at( 1 ).toString(), u"gradient_tag2"_s );
+  QCOMPARE( tagsChangedSpy.at( 10 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad ramp name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::ColorrampEntity, "no ramp", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 11 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::ColorrampEntity, "gradient_tag2", QStringList() << "round ramp" ) );
+  QCOMPARE( tagsChangedSpy.count(), 12 );
+  QCOMPARE( tagsChangedSpy.at( 11 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 11 ).at( 1 ).toString(), u"gradient_tag2"_s );
+  QCOMPARE( tagsChangedSpy.at( 11 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"round ramp"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( u"round ramp"_s ) );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::ColorrampEntity, u"gradient_tag1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::ColorrampEntity, u"gradient_tag2"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "round ramp" ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::ColorrampEntity, "gradient_tag1", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::ColorrampEntity, u"gradient_tag1"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 13 );
+  QCOMPARE( tagsChangedSpy.at( 12 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 12 ).at( 1 ).toString(), u"gradient_tag1"_s );
+  QCOMPARE( tagsChangedSpy.at( 12 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::ColorrampEntity, u"gradient_tag1"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::ColorrampEntity, u"gradient_tag1"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 14 );
+  QCOMPARE( tagsChangedSpy.at( 13 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::ColorrampEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 13 ).at( 1 ).toString(), u"gradient_tag1"_s );
+  QCOMPARE( tagsChangedSpy.at( 13 ).at( 2 ).toStringList(), QStringList() );
+
+  // text formats
+
+  // tag format
+  const QgsTextFormat format1;
+  QVERIFY( mStyle->addTextFormat( "format1", format1, true ) );
+  const QgsTextFormat format2;
+  QVERIFY( mStyle->addTextFormat( "format2", format2, true ) );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::TextFormatEntity, "format1", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 17 );
+  QCOMPARE( tagsChangedSpy.at( 16 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 16 ).at( 1 ).toString(), u"format1"_s );
+  QCOMPARE( tagsChangedSpy.at( 16 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::TextFormatEntity, "format2", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 18 );
+  QCOMPARE( tagsChangedSpy.at( 17 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 17 ).at( 1 ).toString(), u"format2"_s );
+  QCOMPARE( tagsChangedSpy.at( 17 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad format name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::TextFormatEntity, "no format", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 18 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::TextFormatEntity, "format2", QStringList() << "red text" ) );
+  QCOMPARE( tagsChangedSpy.count(), 19 );
+  QCOMPARE( tagsChangedSpy.at( 18 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 18 ).at( 1 ).toString(), u"format2"_s );
+  QCOMPARE( tagsChangedSpy.at( 18 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"red text"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( u"red text"_s ) );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::TextFormatEntity, u"format1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::TextFormatEntity, u"format2"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "red text" ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::TextFormatEntity, "format1", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::TextFormatEntity, u"format1"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 20 );
+  QCOMPARE( tagsChangedSpy.at( 19 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 19 ).at( 1 ).toString(), u"format1"_s );
+  QCOMPARE( tagsChangedSpy.at( 19 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::TextFormatEntity, u"format1"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::TextFormatEntity, u"format1"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 21 );
+  QCOMPARE( tagsChangedSpy.at( 20 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::TextFormatEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 20 ).at( 1 ).toString(), u"format1"_s );
+  QCOMPARE( tagsChangedSpy.at( 20 ).at( 2 ).toStringList(), QStringList() );
+
+
+  // label settings
+
+  // tag format
+  const QgsPalLayerSettings settings1;
+  QVERIFY( mStyle->addLabelSettings( "settings1", settings1, true ) );
+  const QgsPalLayerSettings settings2;
+  QVERIFY( mStyle->addLabelSettings( "settings2", settings2, true ) );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::LabelSettingsEntity, "settings1", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 24 );
+  QCOMPARE( tagsChangedSpy.at( 23 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 23 ).at( 1 ).toString(), u"settings1"_s );
+  QCOMPARE( tagsChangedSpy.at( 23 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::LabelSettingsEntity, "settings2", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 25 );
+  QCOMPARE( tagsChangedSpy.at( 24 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 24 ).at( 1 ).toString(), u"settings2"_s );
+  QCOMPARE( tagsChangedSpy.at( 24 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad format name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::LabelSettingsEntity, "no format", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 25 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::LabelSettingsEntity, "settings2", QStringList() << "red labels" ) );
+  QCOMPARE( tagsChangedSpy.count(), 26 );
+  QCOMPARE( tagsChangedSpy.at( 25 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 25 ).at( 1 ).toString(), u"settings2"_s );
+  QCOMPARE( tagsChangedSpy.at( 25 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"red labels"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( u"red labels"_s ) );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::LabelSettingsEntity, u"settings1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::LabelSettingsEntity, u"settings2"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "red labels" ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::LabelSettingsEntity, "settings1", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::LabelSettingsEntity, u"settings1"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 27 );
+  QCOMPARE( tagsChangedSpy.at( 26 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 26 ).at( 1 ).toString(), u"settings1"_s );
+  QCOMPARE( tagsChangedSpy.at( 26 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::LabelSettingsEntity, u"settings1"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::LabelSettingsEntity, u"settings1"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 28 );
+  QCOMPARE( tagsChangedSpy.at( 27 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LabelSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 27 ).at( 1 ).toString(), u"settings1"_s );
+  QCOMPARE( tagsChangedSpy.at( 27 ).at( 2 ).toStringList(), QStringList() );
+
+
+  // legend patch shape
+
+  // tag format
+  const QgsLegendPatchShape shape1;
+  QVERIFY( mStyle->addLegendPatchShape( "shape1", shape1, true ) );
+  const QgsLegendPatchShape shape2;
+  QVERIFY( mStyle->addLegendPatchShape( "shape2", shape2, true ) );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::LegendPatchShapeEntity, "shape1", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 31 );
+  QCOMPARE( tagsChangedSpy.at( 30 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 30 ).at( 1 ).toString(), u"shape1"_s );
+  QCOMPARE( tagsChangedSpy.at( 30 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::LegendPatchShapeEntity, "shape2", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 32 );
+  QCOMPARE( tagsChangedSpy.at( 31 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 31 ).at( 1 ).toString(), u"shape2"_s );
+  QCOMPARE( tagsChangedSpy.at( 31 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad format name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::LegendPatchShapeEntity, "no patch", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 32 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::LegendPatchShapeEntity, "shape2", QStringList() << "red patch" ) );
+  QCOMPARE( tagsChangedSpy.count(), 33 );
+  QCOMPARE( tagsChangedSpy.at( 32 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 32 ).at( 1 ).toString(), u"shape2"_s );
+  QCOMPARE( tagsChangedSpy.at( 32 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"red patch"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( u"red patch"_s ) );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::LegendPatchShapeEntity, u"shape1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::LegendPatchShapeEntity, u"shape2"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "red patch" ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::LegendPatchShapeEntity, "shape1", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::LegendPatchShapeEntity, u"shape1"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 34 );
+  QCOMPARE( tagsChangedSpy.at( 33 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 33 ).at( 1 ).toString(), u"shape1"_s );
+  QCOMPARE( tagsChangedSpy.at( 33 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::LegendPatchShapeEntity, u"shape1"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::LegendPatchShapeEntity, u"shape1"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 35 );
+  QCOMPARE( tagsChangedSpy.at( 34 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::LegendPatchShapeEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 34 ).at( 1 ).toString(), u"shape1"_s );
+  QCOMPARE( tagsChangedSpy.at( 34 ).at( 2 ).toStringList(), QStringList() );
+
+
+  // 3d symbols
+  // tag format
+  const Dummy3DSymbol symbol3d1;
+  QVERIFY( mStyle->addSymbol3D( "3dsymbol1", symbol3d1.clone(), true ) );
+  const Dummy3DSymbol symbol3d2;
+  QVERIFY( mStyle->addSymbol3D( "3dsymbol2", symbol3d2.clone(), true ) );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::Symbol3DEntity, "3dsymbol1", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 38 );
+  QCOMPARE( tagsChangedSpy.at( 37 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 37 ).at( 1 ).toString(), u"3dsymbol1"_s );
+  QCOMPARE( tagsChangedSpy.at( 37 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::Symbol3DEntity, "3dsymbol2", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 39 );
+  QCOMPARE( tagsChangedSpy.at( 38 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 38 ).at( 1 ).toString(), u"3dsymbol2"_s );
+  QCOMPARE( tagsChangedSpy.at( 38 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad format name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::Symbol3DEntity, "no patch", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 39 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::Symbol3DEntity, "3dsymbol2", QStringList() << "red patch" ) );
+  QCOMPARE( tagsChangedSpy.count(), 40 );
+  QCOMPARE( tagsChangedSpy.at( 39 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 39 ).at( 1 ).toString(), u"3dsymbol2"_s );
+  QCOMPARE( tagsChangedSpy.at( 39 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"red patch"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( u"red patch"_s ) );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::Symbol3DEntity, u"3dsymbol1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::Symbol3DEntity, u"3dsymbol2"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "red patch" ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::Symbol3DEntity, "3dsymbol1", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::Symbol3DEntity, u"3dsymbol1"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 41 );
+  QCOMPARE( tagsChangedSpy.at( 40 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 40 ).at( 1 ).toString(), u"3dsymbol1"_s );
+  QCOMPARE( tagsChangedSpy.at( 40 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::Symbol3DEntity, u"3dsymbol1"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::Symbol3DEntity, u"3dsymbol1"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 42 );
+  QCOMPARE( tagsChangedSpy.at( 41 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::Symbol3DEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 41 ).at( 1 ).toString(), u"3dsymbol1"_s );
+  QCOMPARE( tagsChangedSpy.at( 41 ).at( 2 ).toStringList(), QStringList() );
+
+  // materials
+  // tag format
+  const QgsGoochMaterialSettings material1;
+  QVERIFY( mStyle->addMaterialSettings( "material1", material1.clone(), true ) );
+  const QgsGoochMaterialSettings material2;
+  QVERIFY( mStyle->addMaterialSettings( "material2", material1.clone(), true ) );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::MaterialSettingsEntity, "material1", QStringList() << "blue" << "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 45 );
+  QCOMPARE( tagsChangedSpy.at( 44 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 44 ).at( 1 ).toString(), u"material1"_s );
+  QCOMPARE( tagsChangedSpy.at( 44 ).at( 2 ).toStringList(), QStringList() << u"blue"_s << u"starry"_s );
+
+  QVERIFY( mStyle->tagSymbol( QgsStyle::MaterialSettingsEntity, "material2", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 46 );
+  QCOMPARE( tagsChangedSpy.at( 45 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 45 ).at( 1 ).toString(), u"material2"_s );
+  QCOMPARE( tagsChangedSpy.at( 45 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s );
+
+  //bad format name
+  QVERIFY( !mStyle->tagSymbol( QgsStyle::MaterialSettingsEntity, "no patch", QStringList() << "red" << "circle" ) );
+  QCOMPARE( tagsChangedSpy.count(), 46 );
+  //tag which hasn't been added yet
+  QVERIFY( mStyle->tagSymbol( QgsStyle::MaterialSettingsEntity, "material2", QStringList() << "red settings" ) );
+  QCOMPARE( tagsChangedSpy.count(), 47 );
+  QCOMPARE( tagsChangedSpy.at( 46 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 46 ).at( 1 ).toString(), u"material2"_s );
+  QCOMPARE( tagsChangedSpy.at( 46 ).at( 2 ).toStringList(), QStringList() << u"red"_s << u"circle"_s << u"red settings"_s );
+
+  tags = mStyle->tags();
+  QVERIFY( tags.contains( u"red settings"_s ) );
+
+  //check that tags have been applied
+  tags = mStyle->tagsOfSymbol( QgsStyle::MaterialSettingsEntity, u"material1"_s );
+  QCOMPARE( tags.count(), 2 );
+  QVERIFY( tags.contains( "blue" ) );
+  QVERIFY( tags.contains( "starry" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::MaterialSettingsEntity, u"material2"_s );
+  QCOMPARE( tags.count(), 3 );
+  QVERIFY( tags.contains( "red" ) );
+  QVERIFY( tags.contains( "circle" ) );
+  QVERIFY( tags.contains( "red settings" ) );
+
+  //remove a tag, including a non-present tag
+  QVERIFY( mStyle->detagSymbol( QgsStyle::MaterialSettingsEntity, "material1", QStringList() << "bad" << "blue" ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::MaterialSettingsEntity, u"material1"_s );
+  QCOMPARE( tags.count(), 1 );
+  QVERIFY( tags.contains( "starry" ) );
+  QCOMPARE( tagsChangedSpy.count(), 48 );
+  QCOMPARE( tagsChangedSpy.at( 47 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 47 ).at( 1 ).toString(), u"material1"_s );
+  QCOMPARE( tagsChangedSpy.at( 47 ).at( 2 ).toStringList(), QStringList() << u"starry"_s );
+
+  // completely detag symbol
+  QVERIFY( mStyle->detagSymbol( QgsStyle::MaterialSettingsEntity, u"material1"_s ) );
+  tags = mStyle->tagsOfSymbol( QgsStyle::MaterialSettingsEntity, u"material1"_s );
+  QCOMPARE( tags.count(), 0 );
+  QCOMPARE( tagsChangedSpy.count(), 49 );
+  QCOMPARE( tagsChangedSpy.at( 48 ).at( 0 ).toInt(), static_cast<int>( QgsStyle::MaterialSettingsEntity ) );
+  QCOMPARE( tagsChangedSpy.at( 48 ).at( 1 ).toString(), u"material1"_s );
+  QCOMPARE( tagsChangedSpy.at( 48 ).at( 2 ).toStringList(), QStringList() );
+}
+
+void TestStyle::testSmartGroup()
+{
+  QgsStyle style;
+  style.createMemoryDatabase();
+
+  const QSignalSpy groupModifiedSpy( &style, &QgsStyle::groupsModified );
+
+  std::unique_ptr<QgsMarkerSymbol> sym1( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym2( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  std::unique_ptr<QgsMarkerSymbol> sym3( QgsMarkerSymbol::createSimple( QVariantMap() ) );
+  style.addSymbol( u"symbolA"_s, sym1->clone(), true );
+  style.addSymbol( u"symbolB"_s, sym2->clone(), true );
+  style.addSymbol( u"symbolC"_s, sym3->clone(), true );
+  QgsLimitedRandomColorRamp *randomRamp = new QgsLimitedRandomColorRamp();
+  QVERIFY( style.addColorRamp( "ramp a", randomRamp, true ) );
+  randomRamp = new QgsLimitedRandomColorRamp();
+  QVERIFY( style.addColorRamp( "different bbb", randomRamp, true ) );
+
+  const QgsTextFormat format1;
+  QVERIFY( style.addTextFormat( "format a", format1, true ) );
+  const QgsTextFormat format2;
+  QVERIFY( style.addTextFormat( "different text bbb", format2, true ) );
+
+  const QgsPalLayerSettings settings1;
+  QVERIFY( style.addLabelSettings( "settings a", settings1, true ) );
+  const QgsPalLayerSettings settings2;
+  QVERIFY( style.addLabelSettings( "different l bbb", settings2, true ) );
+
+  const QgsLegendPatchShape shape1;
+  QVERIFY( style.addLegendPatchShape( "shp a", shape1, true ) );
+  const QgsLegendPatchShape shape2;
+  QVERIFY( style.addLegendPatchShape( "different shp bbb", shape2, true ) );
+
+  const Dummy3DSymbol symbol3d1;
+  QVERIFY( style.addSymbol3D( "symbol3D a", symbol3d1.clone(), true ) );
+  const Dummy3DSymbol symbol3d2;
+  QVERIFY( style.addSymbol3D( "different symbol3D bbb", symbol3d2.clone(), true ) );
+
+  const QgsGoochMaterialSettings material1;
+  QVERIFY( style.addMaterialSettings( "material a", material1.clone(), true ) );
+  const QgsGoochMaterialSettings material2;
+  QVERIFY( style.addMaterialSettings( "different mt bbb", material2.clone(), true ) );
+
+  QVERIFY( style.smartgroupNames().empty() );
+  QVERIFY( style.smartgroup( 5 ).isEmpty() );
+  QCOMPARE( style.smartgroupId( u"no exist"_s ), 0 );
+
+  int res = style.addSmartgroup( u"mine"_s, u"AND"_s, QStringList(), QStringList(), QStringList() << u"a"_s, QStringList() );
+  QCOMPARE( res, 1 );
+  QCOMPARE( style.smartgroupNames(), QStringList() << u"mine"_s );
+  QCOMPARE( style.smartgroup( 1 ).values( u"name"_s ), QList<QString>() << u"a"_s );
+  QCOMPARE( style.smartgroupId( u"mine"_s ), 1 );
+  QCOMPARE( groupModifiedSpy.count(), 1 );
+
+  QCOMPARE( style.allNames( QgsStyle::SmartgroupEntity ), QStringList() << u"mine"_s );
+
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::SymbolEntity, 1 ), QStringList() << u"symbolA"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::ColorrampEntity, 1 ), QStringList() << u"ramp a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::TextFormatEntity, 1 ), QStringList() << u"format a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LabelSettingsEntity, 1 ), QStringList() << u"settings a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LegendPatchShapeEntity, 1 ), QStringList() << u"shp a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::Symbol3DEntity, 1 ), QStringList() << u"symbol3D a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::MaterialSettingsEntity, 1 ), QStringList() << u"material a"_s );
+
+  res = style.addSmartgroup( u"tag"_s, u"OR"_s, QStringList(), QStringList(), QStringList() << "c", QStringList() << "a" );
+  QCOMPARE( res, 2 );
+  QCOMPARE( style.smartgroupNames(), QStringList() << u"mine"_s << u"tag"_s );
+  QCOMPARE( style.smartgroup( 2 ).values( u"name"_s ), QList<QString>() << u"c"_s );
+  QCOMPARE( style.smartgroup( 2 ).values( u"!name"_s ), QList<QString>() << u"a"_s );
+  QCOMPARE( style.smartgroupId( u"tag"_s ), 2 );
+  QCOMPARE( groupModifiedSpy.count(), 2 );
+
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::SymbolEntity, 2 ), QStringList() << u"symbolB"_s << u"symbolC"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::ColorrampEntity, 2 ), QStringList() << u"different bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::TextFormatEntity, 2 ), QStringList() << u"different text bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LabelSettingsEntity, 2 ), QStringList() << u"different l bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LegendPatchShapeEntity, 2 ), QStringList() << u"different shp bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::Symbol3DEntity, 2 ), QStringList() << u"different symbol3D bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::MaterialSettingsEntity, 2 ), QStringList() << u"different mt bbb"_s );
+
+  // tag some symbols
+  style.tagSymbol( QgsStyle::SymbolEntity, "symbolA", QStringList() << "red" << "blue" );
+  style.tagSymbol( QgsStyle::SymbolEntity, "symbolB", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::ColorrampEntity, "ramp a", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::ColorrampEntity, "different bbb", QStringList() << "blue" << "red" );
+  style.tagSymbol( QgsStyle::TextFormatEntity, "format a", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::TextFormatEntity, "different text bbb", QStringList() << "blue" << "red" );
+  style.tagSymbol( QgsStyle::LabelSettingsEntity, "settings a", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::LabelSettingsEntity, "different l bbb", QStringList() << "blue" << "red" );
+  style.tagSymbol( QgsStyle::LegendPatchShapeEntity, "shp a", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::LegendPatchShapeEntity, "different shp bbb", QStringList() << "blue" << "red" );
+  style.tagSymbol( QgsStyle::Symbol3DEntity, "symbol3D a", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::Symbol3DEntity, "different symbol3D bbb", QStringList() << "blue" << "red" );
+  style.tagSymbol( QgsStyle::MaterialSettingsEntity, "material a", QStringList() << "blue" );
+  style.tagSymbol( QgsStyle::MaterialSettingsEntity, "different mt bbb", QStringList() << "blue" << "red" );
+
+  // adding tags modifies groups!
+  QCOMPARE( groupModifiedSpy.count(), 4 );
+
+  res = style.addSmartgroup( u"tags"_s, u"AND"_s, QStringList() << "blue", QStringList() << "red", QStringList(), QStringList() );
+  QCOMPARE( res, 3 );
+  QCOMPARE( style.smartgroupNames(), QStringList() << u"mine"_s << u"tag"_s << u"tags"_s );
+  QCOMPARE( style.smartgroup( 3 ).values( u"tag"_s ), QList<QString>() << u"blue"_s );
+  QCOMPARE( style.smartgroup( 3 ).values( u"!tag"_s ), QList<QString>() << u"red"_s );
+  QCOMPARE( style.smartgroupId( u"tags"_s ), 3 );
+  QCOMPARE( groupModifiedSpy.count(), 5 );
+
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::SymbolEntity, 3 ), QStringList() << u"symbolB"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::ColorrampEntity, 3 ), QStringList() << u"ramp a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::TextFormatEntity, 3 ), QStringList() << u"format a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LabelSettingsEntity, 3 ), QStringList() << u"settings a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LegendPatchShapeEntity, 3 ), QStringList() << u"shp a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::Symbol3DEntity, 3 ), QStringList() << u"symbol3D a"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::MaterialSettingsEntity, 3 ), QStringList() << u"material a"_s );
+
+  res = style.addSmartgroup( u"combined"_s, u"AND"_s, QStringList() << "blue", QStringList(), QStringList(), QStringList() << "a" );
+  QCOMPARE( res, 4 );
+  QCOMPARE( style.smartgroupNames(), QStringList() << u"mine"_s << u"tag"_s << u"tags"_s << u"combined"_s );
+  QCOMPARE( style.smartgroup( 4 ).values( u"tag"_s ), QList<QString>() << u"blue"_s );
+  QCOMPARE( style.smartgroup( 4 ).values( u"!name"_s ), QList<QString>() << u"a"_s );
+  QCOMPARE( style.smartgroupId( u"combined"_s ), 4 );
+  QCOMPARE( groupModifiedSpy.count(), 6 );
+
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::SymbolEntity, 4 ), QStringList() << u"symbolB"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::ColorrampEntity, 4 ), QStringList() << u"different bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::TextFormatEntity, 4 ), QStringList() << u"different text bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LabelSettingsEntity, 4 ), QStringList() << u"different l bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::LegendPatchShapeEntity, 4 ), QStringList() << u"different shp bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::Symbol3DEntity, 4 ), QStringList() << u"different symbol3D bbb"_s );
+  QCOMPARE( style.symbolsOfSmartgroup( QgsStyle::MaterialSettingsEntity, 4 ), QStringList() << u"different mt bbb"_s );
+
+  style.remove( QgsStyle::SmartgroupEntity, 1 );
+  QCOMPARE( style.smartgroupNames(), QStringList() << u"tag"_s << u"tags"_s << u"combined"_s );
+  QCOMPARE( groupModifiedSpy.count(), 7 );
+
+  style.remove( QgsStyle::SmartgroupEntity, 4 );
+  QCOMPARE( style.smartgroupNames(), QStringList() << u"tag"_s << u"tags"_s );
+  QCOMPARE( groupModifiedSpy.count(), 8 );
+}
+
+void TestStyle::testIsStyleXml()
+{
+  QVERIFY( !QgsStyle::isXmlStyleFile( QString() ) );
+  QVERIFY( !QgsStyle::isXmlStyleFile( u"blah"_s ) );
+  QVERIFY( QgsStyle::isXmlStyleFile( mTestDataDir + u"categorized.xml"_s ) );
+  QVERIFY( !QgsStyle::isXmlStyleFile( mTestDataDir + u"openstreetmap/testdata.xml"_s ) );
+}
+
+
+class TestVisitor : public QgsStyleEntityVisitorInterface
+{
+  public:
+    TestVisitor( QStringList &found )
+      : mFound( found )
+    {}
+
+    bool visitEnter( const QgsStyleEntityVisitorInterface::Node &node ) override
+    {
+      mFound << u"enter: %1 %2"_s.arg( node.identifier, node.description );
+      return true;
+    }
+
+    bool visitExit( const QgsStyleEntityVisitorInterface::Node &node ) override
+    {
+      mFound << u"exit: %1 %2"_s.arg( node.identifier, node.description );
+      return true;
+    }
+
+    bool visit( const QgsStyleEntityVisitorInterface::StyleLeaf &entity ) override
+    {
+      switch ( entity.entity->type() )
+      {
+        case QgsStyle::SymbolEntity:
+        {
+          mFound << u"symbol: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleSymbolEntity *>( entity.entity )->symbol()->color().name() );
+          break;
+        }
+        case QgsStyle::ColorrampEntity:
+          mFound << u"ramp: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleColorRampEntity *>( entity.entity )->ramp()->color( 0 ).name() );
+          break;
+
+        case QgsStyle::TextFormatEntity:
+          mFound << u"text format: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleTextFormatEntity *>( entity.entity )->format().font().family() );
+          break;
+
+        case QgsStyle::LabelSettingsEntity:
+          mFound << u"labels: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleLabelSettingsEntity *>( entity.entity )->settings().fieldName );
+          break;
+
+        case QgsStyle::LegendPatchShapeEntity:
+          mFound << u"patch: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleLegendPatchShapeEntity *>( entity.entity )->shape().geometry().asWkt() );
+          break;
+
+        case QgsStyle::Symbol3DEntity:
+          mFound << u"symbol 3d: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleSymbol3DEntity *>( entity.entity )->symbol()->type() );
+          break;
+
+        case QgsStyle::MaterialSettingsEntity:
+          mFound << u"material: %1 %2 %3"_s.arg( entity.description, entity.identifier, static_cast<const QgsStyleMaterialSettingsEntity *>( entity.entity )->settings()->type() );
+          break;
+
+        case QgsStyle::TagEntity:
+        case QgsStyle::SmartgroupEntity:
+          break;
+      }
+      return true;
+    }
+
+    QStringList &mFound;
+};
+
+void TestStyle::testVisitor()
+{
+  // test style visitor
+  QgsProject p;
+
+  QStringList found;
+  TestVisitor visitor( found );
+  QVERIFY( p.accept( &visitor ) );
+  QVERIFY( found.isEmpty() );
+
+  QgsVectorLayer *vl = new QgsVectorLayer( u"Point?crs=epsg:4326&field=pk:int&field=col1:string"_s, u"vl"_s, u"memory"_s );
+  QVERIFY( vl->isValid() );
+  p.addMapLayer( vl );
+
+  // with renderer
+  QgsSimpleMarkerSymbolLayer *simpleMarkerLayer = new QgsSimpleMarkerSymbolLayer();
+  QgsMarkerSymbol *markerSymbol = new QgsMarkerSymbol();
+  markerSymbol->changeSymbolLayer( 0, simpleMarkerLayer );
+  vl->setRenderer( new QgsSingleSymbolRenderer( markerSymbol ) );
+
+  QVERIFY( p.accept( &visitor ) );
+  QCOMPARE( found, QStringList() << u"enter: %1 vl"_s.arg( vl->id() ) << u"symbol:   #ff0000"_s << u"exit: %1 vl"_s.arg( vl->id() ) );
+
+  // rule based renderer
+  QgsVectorLayer *vl2 = new QgsVectorLayer( u"Point?crs=epsg:4326&field=pk:int&field=col1:string"_s, u"vl2"_s, u"memory"_s );
+  QVERIFY( vl2->isValid() );
+  p.addMapLayer( vl2 );
+  QgsSymbol *s1 = QgsSymbol::defaultSymbol( Qgis::GeometryType::Point );
+  s1->setColor( QColor( 0, 255, 0 ) );
+  QgsSymbol *s2 = QgsSymbol::defaultSymbol( Qgis::GeometryType::Point );
+  s2->setColor( QColor( 0, 255, 255 ) );
+  QgsRuleBasedRenderer::Rule *rootRule = new QgsRuleBasedRenderer::Rule( nullptr );
+  QgsRuleBasedRenderer::Rule *rule2 = new QgsRuleBasedRenderer::Rule( s1, 0, 0, u"fld >= 5 and fld <= 20"_s );
+  rootRule->appendChild( rule2 );
+  QgsRuleBasedRenderer::Rule *rule3 = new QgsRuleBasedRenderer::Rule( s2, 0, 0, u"fld <= 10"_s );
+  rule2->appendChild( rule3 );
+  vl2->setRenderer( new QgsRuleBasedRenderer( rootRule ) );
+
+  found.clear();
+  QVERIFY( p.accept( &visitor ) );
+  QCOMPARE(
+    found,
+    QStringList()
+      << u"enter: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 "_s.arg( rule2->ruleKey() )
+      << u"symbol:   #00ff00"_s
+      << u"enter: %1 "_s.arg( rule3->ruleKey() )
+      << u"symbol:   #00ffff"_s
+      << u"exit: %1 "_s.arg( rule3->ruleKey() )
+      << u"exit: %1 "_s.arg( rule2->ruleKey() )
+      << u"exit: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 vl"_s.arg( vl->id() )
+      << u"symbol:   #ff0000"_s
+      << u"exit: %1 vl"_s.arg( vl->id() )
+  );
+
+  // labeling
+  QgsPalLayerSettings settings;
+  settings.fieldName = u"Class"_s;
+  vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
+
+  found.clear();
+  QVERIFY( p.accept( &visitor ) );
+
+  QCOMPARE(
+    found,
+    QStringList()
+      << u"enter: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 "_s.arg( rule2->ruleKey() )
+      << u"symbol:   #00ff00"_s
+      << u"enter: %1 "_s.arg( rule3->ruleKey() )
+      << u"symbol:   #00ffff"_s
+      << u"exit: %1 "_s.arg( rule3->ruleKey() )
+      << u"exit: %1 "_s.arg( rule2->ruleKey() )
+      << u"exit: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 vl"_s.arg( vl->id() )
+      << u"symbol:   #ff0000"_s
+      << u"labels:   Class"_s
+      << u"exit: %1 vl"_s.arg( vl->id() )
+  );
+
+  // raster layer
+  QgsRasterLayer *rl = new QgsRasterLayer( QStringLiteral( TEST_DATA_DIR ) + "/tenbytenraster.asc", u"rl"_s );
+  QVERIFY( rl->isValid() );
+  p.addMapLayer( rl );
+
+  QgsRasterShader *rasterShader = new QgsRasterShader();
+  QgsColorRampShader *colorRampShader = new QgsColorRampShader();
+  colorRampShader->setColorRampType( Qgis::ShaderInterpolationMethod::Linear );
+  colorRampShader->setSourceColorRamp( new QgsGradientColorRamp( QColor( 255, 255, 0 ), QColor( 255, 0, 255 ) ) );
+  rasterShader->setRasterShaderFunction( colorRampShader );
+  QgsSingleBandPseudoColorRenderer *r = new QgsSingleBandPseudoColorRenderer( rl->dataProvider(), 1, rasterShader );
+  rl->setRenderer( r );
+
+  found.clear();
+  QVERIFY( p.accept( &visitor ) );
+
+  QCOMPARE(
+    found,
+    QStringList()
+      << u"enter: %1 rl"_s.arg( rl->id() )
+      << u"ramp:   #ffff00"_s
+      << u"exit: %1 rl"_s.arg( rl->id() )
+      << u"enter: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 "_s.arg( rule2->ruleKey() )
+      << u"symbol:   #00ff00"_s
+      << u"enter: %1 "_s.arg( rule3->ruleKey() )
+      << u"symbol:   #00ffff"_s
+      << u"exit: %1 "_s.arg( rule3->ruleKey() )
+      << u"exit: %1 "_s.arg( rule2->ruleKey() )
+      << u"exit: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 vl"_s.arg( vl->id() )
+      << u"symbol:   #ff0000"_s
+      << u"labels:   Class"_s
+      << u"exit: %1 vl"_s.arg( vl->id() )
+  );
+
+  // with layout
+  QgsPrintLayout *l = new QgsPrintLayout( &p );
+  l->setName( u"test layout"_s );
+  l->initializeDefaults();
+  QgsLayoutItemScaleBar *scalebar = new QgsLayoutItemScaleBar( l );
+  scalebar->attemptSetSceneRect( QRectF( 20, 180, 50, 20 ) );
+  l->addLayoutItem( scalebar );
+  scalebar->setTextFormat( QgsTextFormat::fromQFont( QgsFontUtils::getStandardTestFont() ) );
+
+  QgsLayoutItemLegend *legend = new QgsLayoutItemLegend( l );
+  l->addLayoutItem( legend );
+  const QgsLegendPatchShape shape( Qgis::SymbolType::Marker, QgsGeometry::fromWkt( u"Point( 3 4)"_s ) );
+  qobject_cast<QgsLayerTreeLayer *>( legend->model()->index2node( legend->model()->index( 0, 0 ) ) )->setPatchShape( shape );
+  const QgsLegendPatchShape shape2( Qgis::SymbolType::Marker, QgsGeometry::fromWkt( u"Point( 13 14)"_s ) );
+  QCOMPARE( qobject_cast<QgsLayerTreeLayer *>( legend->model()->index2node( legend->model()->index( 1, 0 ) ) )->layer()->name(), u"vl2"_s );
+  QgsMapLayerLegendUtils::setLegendNodePatchShape( qobject_cast<QgsLayerTreeLayer *>( legend->model()->index2node( legend->model()->index( 1, 0 ) ) ), 1, shape2 );
+  legend->model()->refreshLayerLegend( qobject_cast<QgsLayerTreeLayer *>( legend->model()->index2node( legend->model()->index( 1, 0 ) ) ) );
+
+  p.layoutManager()->addLayout( l );
+
+  found.clear();
+  QVERIFY( p.accept( &visitor ) );
+
+  QCOMPARE(
+    found,
+    QStringList()
+      << u"enter: %1 rl"_s.arg( rl->id() )
+      << u"ramp:   #ffff00"_s
+      << u"exit: %1 rl"_s.arg( rl->id() )
+      << u"enter: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 "_s.arg( rule2->ruleKey() )
+      << u"symbol:   #00ff00"_s
+      << u"enter: %1 "_s.arg( rule3->ruleKey() )
+      << u"symbol:   #00ffff"_s
+      << u"exit: %1 "_s.arg( rule3->ruleKey() )
+      << u"exit: %1 "_s.arg( rule2->ruleKey() )
+      << u"exit: %1 vl2"_s.arg( vl2->id() )
+      << u"enter: %1 vl"_s.arg( vl->id() )
+      << u"symbol:   #ff0000"_s
+      << u"labels:   Class"_s
+      << u"exit: %1 vl"_s.arg( vl->id() )
+      << u"enter: layouts Layouts"_s
+      << u"enter: layout test layout"_s
+      << u"patch: <Legend> %1 Point (3 4)"_s.arg( legend->uuid() )
+      << u"patch: <Legend> %1 Point (13 14)"_s.arg( legend->uuid() )
+      << u"text format: <Scalebar> %1 QGIS Vera Sans"_s.arg( scalebar->uuid() )
+      << u"symbol: Page page #ffffff"_s
+      << u"exit: layout test layout"_s
+      << u"exit: layouts Layouts"_s
+  );
+
+  p.removeMapLayer( vl2 );
+
+  // with annotations
+  QgsTextAnnotation *annotation = new QgsTextAnnotation();
+  QgsSymbol *a1 = QgsSymbol::defaultSymbol( Qgis::GeometryType::Point );
+  a1->setColor( QColor( 0, 200, 0 ) );
+  annotation->setMarkerSymbol( static_cast<QgsMarkerSymbol *>( a1 ) );
+  QgsSymbol *a2 = QgsSymbol::defaultSymbol( Qgis::GeometryType::Polygon );
+  a2->setColor( QColor( 200, 200, 0 ) );
+  annotation->setFillSymbol( static_cast<QgsFillSymbol *>( a2 ) );
+  p.annotationManager()->addAnnotation( annotation );
+
+  found.clear();
+  QVERIFY( p.accept( &visitor ) );
+
+  QCOMPARE(
+    found,
+    QStringList()
+      << u"enter: %1 rl"_s.arg( rl->id() )
+      << u"ramp:   #ffff00"_s
+      << u"exit: %1 rl"_s.arg( rl->id() )
+      << u"enter: %1 vl"_s.arg( vl->id() )
+      << u"symbol:   #ff0000"_s
+      << u"labels:   Class"_s
+      << u"exit: %1 vl"_s.arg( vl->id() )
+      << u"enter: layouts Layouts"_s
+      << u"enter: layout test layout"_s
+      << u"patch: <Legend> %1 Point (3 4)"_s.arg( legend->uuid() )
+      << u"text format: <Scalebar> %1 QGIS Vera Sans"_s.arg( scalebar->uuid() )
+      << u"symbol: Page page #ffffff"_s
+      << u"exit: layout test layout"_s
+      << u"exit: layouts Layouts"_s
+      << u"enter: annotations Annotations"_s
+      << u"enter: annotation Annotation"_s
+      << u"symbol: Marker marker #00c800"_s
+      << u"symbol: Fill fill #c8c800"_s
+      << u"exit: annotation Annotation"_s
+      << u"exit: annotations Annotations"_s
+  );
+}
+
+void TestStyle::testColorRampShaderClassificationEqualInterval()
+{
+  // Test Type::Interpolated and ClassificationMode::EqualInterval
+  {
+    auto shader
+      = std::make_unique<QgsColorRampShader>( 0.0, 255.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), Qgis::ShaderInterpolationMethod::Linear, Qgis::ShaderClassificationMethod::EqualInterval );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 0, QColor( 0, 255, 0 ), "0" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 63.75, QColor( 0, 191, 64 ), "63.8" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 127.5, QColor( 0, 128, 128 ), "128" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 191.25, QColor( 0, 64, 191 ), "191" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 255, QColor( 0, 0, 255 ), "255" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+
+  // Test Type::Exact and ClassificationMode::EqualInterval
+  {
+    auto shader = std::make_unique<QgsColorRampShader>( 0.0, 255.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), Qgis::ShaderInterpolationMethod::Exact, Qgis::ShaderClassificationMethod::EqualInterval );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 0, QColor( 0, 255, 0 ), "0" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 63.75, QColor( 0, 191, 64 ), "63.8" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 127.5, QColor( 0, 128, 128 ), "128" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 191.25, QColor( 0, 64, 191 ), "191" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 255, QColor( 0, 0, 255 ), "255" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+
+  // Test Type::Discrete and ClassificationMode::EqualInterval
+  {
+    auto shader
+      = std::make_unique<QgsColorRampShader>( 0.0, 255.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), Qgis::ShaderInterpolationMethod::Discrete, Qgis::ShaderClassificationMethod::EqualInterval );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 51, QColor( 0, 255, 0 ), "51" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 102, QColor( 0, 191, 64 ), "102" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 153, QColor( 0, 128, 128 ), "153" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 204, QColor( 0, 64, 191 ), "204" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( qInf(), QColor( 0, 0, 255 ), "inf" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+
+  // Test when min == max for EqualInterval mode
+  for ( int i = 0; i < 3; ++i )
+  {
+    const Qgis::ShaderInterpolationMethod type = static_cast<Qgis::ShaderInterpolationMethod>( i );
+    auto shader = std::make_unique<QgsColorRampShader>( 0.0, 0.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), type, Qgis::ShaderClassificationMethod::EqualInterval );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 0, QColor( 0, 255, 0 ), "0" ) );
+    if ( type == Qgis::ShaderInterpolationMethod::Discrete )
+      itemsList2.append( QgsColorRampShader::ColorRampItem( qInf(), QColor( 0, 0, 255 ), "inf" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+}
+
+void TestStyle::testColorRampShaderClassificationContinius()
+{
+  // Test Type::Interpolated and ClassificationMode::Continuous
+  {
+    auto shader = std::make_unique<QgsColorRampShader>( 0.0, 255.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), Qgis::ShaderInterpolationMethod::Linear, Qgis::ShaderClassificationMethod::Continuous );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 0, QColor( 0, 255, 0 ), "0" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 255, QColor( 0, 0, 255 ), "255" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+
+  // Test Type::Exact and ClassificationMode::Continuous
+  {
+    auto shader = std::make_unique<QgsColorRampShader>( 0.0, 255.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), Qgis::ShaderInterpolationMethod::Exact, Qgis::ShaderClassificationMethod::Continuous );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 0, QColor( 0, 255, 0 ), "0" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 255, QColor( 0, 0, 255 ), "255" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+
+  // Test Type::Discrete and ClassificationMode::Continuous
+  {
+    auto shader = std::make_unique<QgsColorRampShader>( 0.0, 255.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), Qgis::ShaderInterpolationMethod::Discrete, Qgis::ShaderClassificationMethod::Continuous );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 127.5, QColor( 0, 255, 0 ), "128" ) );
+    itemsList2.append( QgsColorRampShader::ColorRampItem( qInf(), QColor( 0, 0, 255 ), "inf" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+
+  // Test when min == max for Continuous mode
+  for ( int i = 0; i < 3; ++i )
+  {
+    const Qgis::ShaderInterpolationMethod type = static_cast<Qgis::ShaderInterpolationMethod>( i );
+    auto shader = std::make_unique<QgsColorRampShader>( 0.0, 0.0, new QgsGradientColorRamp( Qt::green, Qt::blue ), type, Qgis::ShaderClassificationMethod::Continuous );
+    shader->classifyColorRamp( 5, -1 );
+
+    QList<QgsColorRampShader::ColorRampItem> itemsList = shader->colorRampItemList();
+    QList<QgsColorRampShader::ColorRampItem> itemsList2;
+    itemsList2.append( QgsColorRampShader::ColorRampItem( 0, QColor( 0, 255, 0 ), "0" ) );
+    if ( type == Qgis::ShaderInterpolationMethod::Discrete )
+      itemsList2.append( QgsColorRampShader::ColorRampItem( qInf(), QColor( 0, 0, 255 ), "inf" ) );
+
+    QVERIFY( compareItemLists( itemsList, itemsList2 ) );
+  }
+}
+
+void TestStyle::testDefaultLabelTextFormat()
+{
+  // no "Default" text format yet
+  QVERIFY( !QgsStyle::defaultStyle()->textFormat( u"Default"_s ).isValid() );
+
+  const QgsPalLayerSettings settings;
+  // should be app-wide default font (gross!)
+  QCOMPARE( settings.format().font().family(), QFont().family() );
+
+  // now add a default text format
+  QgsTextFormat format;
+  format.setFont( QgsFontUtils::getStandardTestFont() );
+  format.buffer().setEnabled( true );
+  QVERIFY( QgsStyle::defaultStyle()->addTextFormat( u"Default"_s, format ) );
+
+  // re-create default label settings
+  const QgsPalLayerSettings settings2;
+  // should be default text format now, not app default font
+  QCOMPARE( settings2.format().font().family(), QgsFontUtils::getStandardTestFont().family() );
+  QVERIFY( settings2.format().buffer().enabled() );
+}
+
+QGSTEST_MAIN( TestStyle )
+#include "testqgsstyle.moc"

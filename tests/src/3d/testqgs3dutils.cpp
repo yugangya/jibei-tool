@@ -1,0 +1,753 @@
+/***************************************************************************
+     testqgs3dutils.cpp
+     ----------------------
+    Date                 : November 2017
+    Copyright            : (C) 2017 by Martin Dobias
+    Email                : wonder dot sk at gmail dot com
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#include "qgs3d.h"
+#include "qgs3dmapscene.h"
+#include "qgs3dutils.h"
+#include "qgsbox3d.h"
+#include "qgscameracontroller.h"
+#include "qgsflatterrainsettings.h"
+#include "qgsoffscreen3dengine.h"
+#include "qgspolygon3dsymbol.h"
+#include "qgsrasterlayer.h"
+#include "qgsray3d.h"
+#include "qgsraycastcontext.h"
+#include "qgstest.h"
+#include "qgsvectorlayer.h"
+#include "qgsvectorlayer3drenderer.h"
+
+#include <QSize>
+#include <QString>
+#include <Qt3DRender/QShaderProgram>
+#include <QtMath>
+
+using namespace Qt::StringLiterals;
+
+static bool qgsVectorNear( const QVector3D &v1, const QVector3D &v2, double eps )
+{
+  return qgsDoubleNear( v1.x(), v2.x(), eps ) && qgsDoubleNear( v1.y(), v2.y(), eps ) && qgsDoubleNear( v1.z(), v2.z(), eps );
+}
+
+static bool qgsQuaternionNear( const QQuaternion &q1, const QQuaternion &q2, double eps )
+{
+  return qgsDoubleNear( q1.x(), q2.x(), eps ) && qgsDoubleNear( q1.y(), q2.y(), eps ) && qgsDoubleNear( q1.z(), q2.z(), eps ) && qgsDoubleNear( q1.scalar(), q2.scalar(), eps );
+}
+
+static bool isPointInFrontOfPlane( const QgsVector3D &point, const QgsVector3D &planePoint, const QgsVector3D &planeNormal )
+{
+  return QgsVector3D::dotProduct( point - planePoint, planeNormal ) > 0;
+}
+
+static bool isPointOutsideClippingPlanes( const QgsVector3D &point, const QVector<QgsVector3D> &planePoints, const QList<QVector4D> &clippingPlanes )
+{
+  for ( int i = 0; i < clippingPlanes.size(); i++ )
+  {
+    if ( !isPointInFrontOfPlane( point, planePoints.at( i ), clippingPlanes.at( i ).toVector3D() ) )
+    {
+      return true;
+    };
+  }
+  return false;
+}
+
+/**
+ * \ingroup UnitTests
+ * This is a unit test for the vertex tool
+ */
+class TestQgs3DUtils : public QgsTest
+{
+    Q_OBJECT
+  public:
+    TestQgs3DUtils()
+      : QgsTest( u"3D Utils"_s, u"3d"_s )
+    {}
+
+  private slots:
+    void initTestCase();    // will be called before the first testfunction is executed.
+    void cleanupTestCase(); // will be called after the last testfunction was executed.
+
+    void testTransforms();
+    void testRayFromScreenPoint();
+    void testQgsBox3DDistanceTo();
+    void testQgsRay3D();
+    void testDefinesToShaderCode();
+    void testDecomposeTransformMatrix();
+    void testScreenPointToMapCoordinates();
+    void testLineSegmentToClippingPlanes();
+    void testLineSegmentToCameraPose();
+    void test3DSceneRay3D();
+    void testSrgbToLinear_data();
+    void testSrgbToLinear();
+    void testCalculateDirectionalLightUpVector_data();
+    void testCalculateDirectionalLightUpVector();
+    void testCalculateCascadeSplits_data();
+    void testCalculateCascadeSplits();
+    void testCalculateViewSpaceOrthographicBounds_data();
+    void testCalculateViewSpaceOrthographicBounds();
+    void testDetermineTextureFormat_data();
+    void testDetermineTextureFormat();
+
+  private:
+    QgsRasterLayer *mLayerRgb;
+    QgsVectorLayer *mLayerBuildings;
+};
+
+//runs before all tests
+void TestQgs3DUtils::initTestCase()
+{
+  QgsApplication::init();
+  QgsApplication::initQgis();
+  Qgs3D::initialize();
+
+  mLayerRgb = new QgsRasterLayer( testDataPath( "/3d/rgb.tif" ), "rgb", "gdal" );
+  QVERIFY( mLayerRgb->isValid() );
+
+  mLayerBuildings = new QgsVectorLayer( testDataPath( "/3d/buildings.shp" ), "buildings", "ogr" );
+  QVERIFY( mLayerBuildings->isValid() );
+}
+
+//runs after all tests
+void TestQgs3DUtils::cleanupTestCase()
+{
+  QgsApplication::exitQgis();
+}
+
+void TestQgs3DUtils::testTransforms()
+{
+  const QgsVector3D map123( 1, 2, 3 );
+
+  const QgsVector3D world123 = Qgs3DUtils::mapToWorldCoordinates( map123, QgsVector3D() );
+  QCOMPARE( world123, QgsVector3D( 1, 2, 3 ) );
+
+  const QgsVector3D world123map = Qgs3DUtils::worldToMapCoordinates( world123, QgsVector3D() );
+  QCOMPARE( world123map, map123 );
+
+  // now with non-zero origin
+
+  const QgsVector3D origin( -10, -20, -30 );
+
+  const QgsVector3D world123x = Qgs3DUtils::mapToWorldCoordinates( map123, origin );
+  QCOMPARE( world123x, QgsVector3D( 11, 22, 33 ) );
+
+  const QgsVector3D world123xmap = Qgs3DUtils::worldToMapCoordinates( world123x, origin );
+  QCOMPARE( world123xmap, map123 );
+
+  //
+  // transform world point from one system to another
+  //
+
+  const QgsVector3D worldPoint1( 5, 6, 7 );
+  const QgsVector3D origin1( 10, 20, 30 );
+  const QgsVector3D origin2( 1, 2, 3 );
+  const QgsVector3D worldPoint2 = Qgs3DUtils::transformWorldCoordinates( worldPoint1, origin1, QgsCoordinateReferenceSystem(), origin2, QgsCoordinateReferenceSystem(), QgsCoordinateTransformContext() );
+  QCOMPARE( worldPoint2, QgsVector3D( 14, 24, 34 ) );
+  // verify that both are the same map point
+  const QgsVector3D mapPoint1 = Qgs3DUtils::worldToMapCoordinates( worldPoint1, origin1 );
+  const QgsVector3D mapPoint2 = Qgs3DUtils::worldToMapCoordinates( worldPoint2, origin2 );
+  QCOMPARE( mapPoint1, mapPoint2 );
+}
+
+void TestQgs3DUtils::testRayFromScreenPoint()
+{
+  Qt3DRender::QCamera camera;
+  {
+    camera.setFieldOfView( 45.0f );
+    camera.setNearPlane( 10.0f );
+    camera.setFarPlane( 100.0f );
+    camera.setAspectRatio( 2 );
+    camera.setPosition( QVector3D( 9.0f, 15.0f, 30.0f ) );
+    camera.setUpVector( QVector3D( 0.0f, 1.0f, 0.0f ) );
+    camera.setViewCenter( QVector3D( 0.0f, 0.0f, 0.0f ) );
+
+    {
+      const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( QPoint( 50, 50 ), QSize( 100, 100 ), &camera );
+      const QgsRay3D ray2( QVector3D( 8.99999904632568f, 14.9999980926514f, 29.9999980926514f ), QVector3D( -0.25916051864624f, -0.431934207677841f, -0.863868415355682f ) );
+      QGSCOMPARENEARVECTOR3D( ray1.origin(), ray2.origin(), 0.00001 );
+      QGSCOMPARENEARVECTOR3D( ray1.direction(), ray2.direction(), 0.00001 );
+    }
+    {
+      const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( QPoint( 0, 0 ), QSize( 100, 100 ), &camera );
+      const QgsRay3D ray2( QVector3D( 8.99999904632568f, 14.9999980926514f, 29.9999980926514f ), QVector3D( -0.810001313686371f, -0.0428109727799892f, -0.584863305091858f ) );
+      QGSCOMPARENEARVECTOR3D( ray1.origin(), ray2.origin(), 0.00001 );
+      QGSCOMPARENEARVECTOR3D( ray1.direction(), ray2.direction(), 0.00001 );
+    }
+    {
+      const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( QPoint( 100, 100 ), QSize( 100, 100 ), &camera );
+      const QgsRay3D ray2( QVector3D( 8.99999904632568f, 14.9999980926514f, 29.9999980926514f ), QVector3D( 0.429731547832489f, -0.590972006320953f, -0.682702660560608f ) );
+      QGSCOMPARENEARVECTOR3D( ray1.origin(), ray2.origin(), 0.00001 );
+      QGSCOMPARENEARVECTOR3D( ray1.direction(), ray2.direction(), 0.00001 );
+    }
+  }
+
+  {
+    camera.setFieldOfView( 60.0f );
+    camera.setNearPlane( 1.0f );
+    camera.setFarPlane( 1000.0f );
+    camera.setAspectRatio( 2 );
+    camera.setPosition( QVector3D( 0.0f, 0.0f, 0.0f ) );
+    camera.setUpVector( QVector3D( 0.0f, 1.0f, 0.0f ) );
+    camera.setViewCenter( QVector3D( 0.0f, 100.0f, -100.0f ) );
+
+    {
+      const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( QPoint( 500, 500 ), QSize( 1000, 1000 ), &camera );
+      const QgsRay3D ray2( QVector3D( 0, 0, 0 ), QVector3D( 0, 0.70710676908493f, -0.70710676908493f ) );
+      QGSCOMPARENEARVECTOR3D( ray1.origin(), ray2.origin(), 0.00001 );
+      QGSCOMPARENEARVECTOR3D( ray1.direction(), ray2.direction(), 0.00001 );
+    }
+    {
+      const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( QPoint( 0, 0 ), QSize( 1000, 1000 ), &camera );
+      const QgsRay3D ray2( QVector3D( 0, 0, 0 ), QVector3D( -0.70710676908493f, 0.683012664318085f, -0.183012709021568f ) );
+      QGSCOMPARENEARVECTOR3D( ray1.origin(), ray2.origin(), 0.00001 );
+      QGSCOMPARENEARVECTOR3D( ray1.direction(), ray2.direction(), 0.00001 );
+    }
+    {
+      const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( QPoint( 500, 1000 ), QSize( 1000, 1000 ), &camera );
+      const QgsRay3D ray2( QVector3D( 0, 0, 0 ), QVector3D( 0, 0.258819073438644f, -0.965925812721252f ) );
+      QGSCOMPARENEARVECTOR3D( ray1.origin(), ray2.origin(), 0.00001 );
+      QGSCOMPARENEARVECTOR3D( ray1.direction(), ray2.direction(), 0.00001 );
+    }
+  }
+}
+
+void TestQgs3DUtils::testQgsBox3DDistanceTo()
+{
+  {
+    const QgsBox3D box( -1, -1, -1, 1, 1, 1 );
+    QCOMPARE( box.distanceTo( QgsVector3D( 0, 0, 0 ) ), 0.0 );
+    QCOMPARE( box.distanceTo( QgsVector3D( 2, 2, 2 ) ), std::sqrt( 3.0 ) );
+  }
+  {
+    const QgsBox3D box( 1, 2, 1, 4, 3, 3 );
+    QCOMPARE( box.distanceTo( QgsVector3D( 1, 2, 1 ) ), 0.0 );
+    QCOMPARE( box.distanceTo( QgsVector3D( 0, 0, 0 ) ), std::sqrt( 6.0 ) );
+  }
+}
+
+void TestQgs3DUtils::testQgsRay3D()
+{
+  {
+    const QgsRay3D ray( QVector3D( 0, 0, 0 ), QVector3D( 1, 1, 1 ) );
+    const QVector3D p1( 0.5f, 0.5f, 0.5f );
+    const QVector3D p2( -0.5f, -0.5f, -0.5f );
+    // points are already on the ray
+    const QVector3D projP1 = ray.projectedPoint( p1 );
+    const QVector3D projP2 = ray.projectedPoint( p2 );
+
+    QCOMPARE( p1.x(), projP1.x() );
+    QCOMPARE( p1.y(), projP1.y() );
+    QCOMPARE( p1.z(), projP1.z() );
+
+    QCOMPARE( p2.x(), projP2.x() );
+    QCOMPARE( p2.y(), projP2.y() );
+    QCOMPARE( p2.z(), projP2.z() );
+
+    QVERIFY( qFuzzyIsNull( ( float ) ray.angleToPoint( p1 ) ) );
+    QVERIFY( qFuzzyIsNull( ( float ) ray.angleToPoint( p2 ) ) );
+
+    QVERIFY( ray.isInFront( p1 ) );
+    QVERIFY( !ray.isInFront( p2 ) );
+  }
+
+  {
+    const QgsRay3D ray( QVector3D( 0, 0, 0 ), QVector3D( 1, 1, 1 ) );
+    const QVector3D p1( 0, 1, 1 );
+    const QVector3D p2( 0, -1, -1 );
+    const QVector3D expectedProjP1( 0.666667f, 0.666667f, 0.666667f );
+    const QVector3D expectedProjP2( -0.666667f, -0.666667f, -0.666667f );
+
+    const QVector3D projP1 = ray.projectedPoint( p1 );
+    QCOMPARE( projP1.x(), expectedProjP1.x() );
+    QCOMPARE( projP1.y(), expectedProjP1.y() );
+    QCOMPARE( projP1.z(), expectedProjP1.z() );
+
+    const QVector3D projP2 = ray.projectedPoint( p2 );
+    QCOMPARE( projP2.x(), expectedProjP2.x() );
+    QCOMPARE( projP2.y(), expectedProjP2.y() );
+    QCOMPARE( projP2.z(), expectedProjP2.z() );
+
+    QVERIFY( ray.isInFront( p1 ) );
+    QVERIFY( !ray.isInFront( p2 ) );
+  }
+}
+
+void TestQgs3DUtils::testDefinesToShaderCode()
+{
+  // load the different files
+  const QByteArray shaderCode = Qt3DRender::QShaderProgram::loadSource( QUrl::fromLocalFile( testDataPath( "/3d/shader/sample.frag" ) ) );
+  QVERIFY( !shaderCode.isEmpty() );
+
+  const QByteArray shaderCodeWithDefines = Qt3DRender::QShaderProgram::loadSource( QUrl::fromLocalFile( testDataPath( "/3d/shader/sample_with_defines.frag" ) ) );
+  QVERIFY( !shaderCodeWithDefines.isEmpty() );
+
+  const QByteArray shaderCodeNoVersion = Qt3DRender::QShaderProgram::loadSource( QUrl::fromLocalFile( testDataPath( "/3d/shader/sample_no_version.frag" ) ) );
+  QVERIFY( !shaderCodeNoVersion.isEmpty() );
+
+  const QByteArray shaderCodeNoVersionWithDefines = Qt3DRender::QShaderProgram::loadSource( QUrl::fromLocalFile( testDataPath( "/3d/shader/sample_no_version_with_defines.frag" ) ) );
+  QVERIFY( !shaderCodeNoVersionWithDefines.isEmpty() );
+
+  const QByteArray shaderCodeWithBaseColorMap = Qt3DRender::QShaderProgram::loadSource( QUrl::fromLocalFile( testDataPath( "/3d/shader/sample_with_basecolormap.frag" ) ) );
+  QVERIFY( !shaderCodeWithBaseColorMap.isEmpty() );
+
+  const QStringList definesList( { "BASE_COLOR_MAP", "ROUGHNESS_MAP" } );
+
+
+  // =============================================
+  // =========== test addDefinesToShaderCode
+
+  // test a shader code
+  const QByteArray actualShaderCodeWithDefines = Qgs3DUtils::addDefinesToShaderCode( shaderCode, definesList );
+  QCOMPARE( actualShaderCodeWithDefines, shaderCodeWithDefines );
+
+  // shader code without a #version - this should not happen
+  // in that case the #define is inserted at the beginning
+  const QByteArray actualShaderCodeNoVersionWithDefines = Qgs3DUtils::addDefinesToShaderCode( shaderCodeNoVersion, definesList );
+  QCOMPARE( actualShaderCodeNoVersionWithDefines, shaderCodeNoVersionWithDefines );
+
+  // input is empty
+  // the result only contains the #define code
+  const QByteArray onlyDefines = Qgs3DUtils::addDefinesToShaderCode( QByteArray(), definesList );
+  QCOMPARE( onlyDefines, QByteArray( "#define BASE_COLOR_MAP\n#define ROUGHNESS_MAP\n" ) );
+
+
+  // =============================================
+  // =========== test removeDefinesFromShaderCode
+
+  // test a shader code
+  const QByteArray actualShaderCodeWithoutDefines = Qgs3DUtils::removeDefinesFromShaderCode( shaderCodeWithDefines, definesList );
+  QCOMPARE( actualShaderCodeWithoutDefines, shaderCode );
+
+  // remove defines one by one
+  const QByteArray actualShaderCodeWithBaseColorMap = Qgs3DUtils::removeDefinesFromShaderCode( shaderCodeWithDefines, QStringList { "ROUGHNESS_MAP" } );
+  QCOMPARE( actualShaderCodeWithBaseColorMap, shaderCodeWithBaseColorMap );
+
+  const QByteArray actualShaderCode = Qgs3DUtils::removeDefinesFromShaderCode( actualShaderCodeWithBaseColorMap, QStringList { "BASE_COLOR_MAP" } );
+  QCOMPARE( actualShaderCode, shaderCode );
+
+  // shader code without a #version - this should not happen
+  // define macros should be removed
+  const QByteArray actualShaderCodeNoVersionWithoutDefines = Qgs3DUtils::removeDefinesFromShaderCode( shaderCodeNoVersionWithDefines, definesList );
+  QCOMPARE( actualShaderCodeNoVersionWithoutDefines, shaderCodeNoVersion );
+
+  // input is empty
+  // result should be empty
+  const QByteArray actualEmpty = Qgs3DUtils::removeDefinesFromShaderCode( QByteArray(), definesList );
+  QCOMPARE( actualEmpty, QByteArray() );
+}
+
+void TestQgs3DUtils::testDecomposeTransformMatrix()
+{
+  QMatrix4x4 m1;
+  m1.translate( QVector3D( 100, 200, 300 ) );
+  m1.scale( QVector3D( 2, 5, 7 ) );
+  QVector3D t1, s1;
+  QQuaternion r1;
+  Qgs3DUtils::decomposeTransformMatrix( m1, t1, r1, s1 );
+
+  QCOMPARE( s1, QVector3D( 2, 5, 7 ) );
+  QCOMPARE( t1, QVector3D( 100, 200, 300 ) );
+  QCOMPARE( r1, QQuaternion() );
+
+  QMatrix4x4 m2;
+  m2.translate( QVector3D( 500, 600, 700 ) );
+  QQuaternion q2 = QQuaternion::fromAxisAndAngle( QVector3D( 1, 0, 0 ), 90 );
+  m2.rotate( q2 );
+  QVector3D t2, s2;
+  QQuaternion r2;
+  Qgs3DUtils::decomposeTransformMatrix( m2, t2, r2, s2 );
+
+  QVERIFY( qgsVectorNear( s2, QVector3D( 1, 1, 1 ), 1e-6 ) );
+  QVERIFY( qgsVectorNear( t2, QVector3D( 500, 600, 700 ), 1e-6 ) );
+  QVERIFY( qgsQuaternionNear( r2, q2, 1e-6 ) );
+}
+
+void TestQgs3DUtils::testScreenPointToMapCoordinates()
+{
+  Qgs3DMapSettings map;
+  map.setCrs( mLayerRgb->crs() );
+  map.setExtent( mLayerRgb->extent() );
+  map.setLayers( QList<QgsMapLayer *>() << mLayerRgb );
+  QgsOffscreen3DEngine engine;
+  const Qgs3DMapScene *scene = new Qgs3DMapScene( map, &engine );
+  const QgsPoint mapPoint = Qgs3DUtils::screenPointToMapCoordinates( QPoint( 50, 50 ), QSize( 100, 100 ), scene->cameraController(), &map );
+
+  // this placement is weird, but it fixes the clang-tidy warning
+  delete scene;
+  QGSCOMPARENEAR( mapPoint.x(), 321900, 2 );
+  QGSCOMPARENEAR( mapPoint.y(), 129901, 2 );
+  QGSCOMPARENEAR( mapPoint.z(), -252, 2 );
+}
+
+void TestQgs3DUtils::testLineSegmentToClippingPlanes()
+{
+  const QgsVector3D point1( 20, 20, 0 );
+  const QgsVector3D point2( 50, 50, 0 );
+  const QgsVector3D testPointInside( 35, 35, 0 );
+  const QgsVector3D testPointOutside( 0, 0, 0 );
+  QVector<QgsVector3D> planePoints( { point1, QgsVector3D( 13, 27, 0 ), point2, QgsVector3D( 27, 13, 0 ) } );
+
+  QList<QVector4D> clippingPlanes = Qgs3DUtils::lineSegmentToClippingPlanes( point1, point2, 10, QgsVector3D( 0, 0, 0 ) );
+  QVERIFY( clippingPlanes.size() == 4 );
+  QVERIFY( !isPointOutsideClippingPlanes( testPointInside, planePoints, clippingPlanes ) );
+  QVERIFY( isPointOutsideClippingPlanes( testPointOutside, planePoints, clippingPlanes ) );
+
+  //verify that it works in reverse order too
+  clippingPlanes = Qgs3DUtils::lineSegmentToClippingPlanes( point2, point1, 10, QgsVector3D( 0, 0, 0 ) );
+  QVERIFY( clippingPlanes.size() == 4 );
+  planePoints = { point2, QgsVector3D( 27, 13, 0 ), point1, QgsVector3D( 13, 27, 0 ) };
+  QVERIFY( !isPointOutsideClippingPlanes( testPointInside, planePoints, clippingPlanes ) );
+  QVERIFY( isPointOutsideClippingPlanes( testPointOutside, planePoints, clippingPlanes ) );
+
+  // verify that it works for perpendicular line too
+  const QgsVector3D point3( 50, 20, 0 );
+  const QgsVector3D point4( 20, 50, 0 );
+  clippingPlanes = Qgs3DUtils::lineSegmentToClippingPlanes( point3, point4, 10, QgsVector3D( 0, 0, 0 ) );
+  QVERIFY( clippingPlanes.size() == 4 );
+  planePoints = { point3, QgsVector3D( 43, 13, 0 ), point4, QgsVector3D( 57, 27, 0 ) };
+  QVERIFY( !isPointOutsideClippingPlanes( testPointInside, planePoints, clippingPlanes ) );
+  QVERIFY( isPointOutsideClippingPlanes( testPointOutside, planePoints, clippingPlanes ) );
+
+  // verify that it works for perpendicular line in reverse order too
+  clippingPlanes = Qgs3DUtils::lineSegmentToClippingPlanes( point4, point3, 10, QgsVector3D( 0, 0, 0 ) );
+  QVERIFY( clippingPlanes.size() == 4 );
+  planePoints = { point4, QgsVector3D( 57, 27, 0 ), point3, QgsVector3D( 43, 13, 0 ) };
+  QVERIFY( !isPointOutsideClippingPlanes( testPointInside, planePoints, clippingPlanes ) );
+  QVERIFY( isPointOutsideClippingPlanes( testPointOutside, planePoints, clippingPlanes ) );
+}
+
+void TestQgs3DUtils::testLineSegmentToCameraPose()
+{
+  const QgsVector3D origin( 0, 0, 0 );
+  const QgsVector3D startPoint( 20, 20, 0 );
+  const QgsVector3D endPoint( 82, 82, 0 );
+  QgsDoubleRange elevationRange( 0, 20 );
+  constexpr float fieldOfView = 90;
+
+  // test 1: the distance between start point and end point is longer than elevation range
+  QgsCameraPose camPose = Qgs3DUtils::lineSegmentToCameraPose( startPoint, endPoint, elevationRange, fieldOfView, origin );
+  QCOMPARE( camPose.centerPoint(), QgsVector3D( 51, 51, 10 ) );
+  QCOMPARE( camPose.pitchAngle(), 90 );
+  QCOMPARE( camPose.headingAngle(), 45 );
+  QGSCOMPARENEAR( camPose.distanceFromCenterPoint(), 46, 0.2 );
+
+  // test 2: the distance between start point and end point is smaller than elevation range
+  elevationRange = QgsDoubleRange( 0, 100 );
+  camPose = Qgs3DUtils::lineSegmentToCameraPose( startPoint, endPoint, elevationRange, fieldOfView, origin );
+  QCOMPARE( camPose.centerPoint(), QgsVector3D( 51, 51, 50 ) );
+  QCOMPARE( camPose.pitchAngle(), 90 );
+  QCOMPARE( camPose.headingAngle(), 45 );
+  QGSCOMPARENEAR( camPose.distanceFromCenterPoint(), 52.5, 0.2 );
+}
+
+void TestQgs3DUtils::test3DSceneRay3D()
+{
+  // configure map Settings
+  Qgs3DMapSettings mapSettings;
+  mapSettings.setCrs( mLayerRgb->crs() );
+  mapSettings.setExtent( mLayerRgb->extent() );
+  mapSettings.setLayers( QList<QgsMapLayer *>() << mLayerBuildings << mLayerRgb );
+
+  QgsFlatTerrainSettings *flatTerrainSettings = new QgsFlatTerrainSettings;
+  mapSettings.setTerrainSettings( flatTerrainSettings );
+
+  QgsPhongMaterialSettings materialSettings;
+  materialSettings.setAmbient( Qt::lightGray );
+  QgsPolygon3DSymbol *symbol3d = new QgsPolygon3DSymbol;
+  symbol3d->setMaterialSettings( materialSettings.clone() );
+  symbol3d->setExtrusionHeight( 10.f );
+  QgsVectorLayer3DRenderer *renderer3d = new QgsVectorLayer3DRenderer( symbol3d );
+  mLayerBuildings->setRenderer3D( renderer3d );
+
+  // create the 3d scene
+  const QSize winSize( 640, 480 ); // default window size
+  QgsOffscreen3DEngine engine;
+  engine.setSize( winSize );
+  Qgs3DMapScene *scene = new Qgs3DMapScene( mapSettings, &engine );
+  engine.setRootEntity( scene );
+
+  scene->cameraController()->setLookingAtPoint( QVector3D( 0, -280, 0 ), 50, 40.0, -10.0 );
+
+  // This is needed to ensure that the nodes of mLayerBuildings are loaded
+  Qgs3DUtils::captureSceneImage( engine, scene );
+
+  // click on a building
+  // building and terrain are hit
+  // the distance to the building should be smaller than the distance to the terrain
+  Qt3DRender::QCamera *camera = scene->cameraController()->camera();
+  const QPoint clickedPoint1( 115, 374 );
+  const QgsRay3D ray1 = Qgs3DUtils::rayFromScreenPoint( clickedPoint1, winSize, camera );
+  QgsRayCastContext context;
+  context.setMaximumDistance( camera->farPlane() );
+  const QgsRayCastResult result1 = Qgs3DUtils::castRay( scene, ray1, context );
+
+  const QList< QgsRayCastHit > terrainHits1 = result1.terrainHits();
+  const QList< QgsRayCastHit > allHits1 = result1.allHits();
+  const QList< QgsRayCastHit > buildingsHits1 = result1.layerHits( mLayerBuildings );
+
+  QVERIFY( result1.hasLayerHits() );
+  QVERIFY( result1.hasTerrainHits() );
+  QCOMPARE( allHits1.size(), 2 );
+  QCOMPARE( terrainHits1.size(), 1 );
+  QCOMPARE( buildingsHits1.size(), 1 );
+
+  const double buildingDistance1 = buildingsHits1.constFirst().distance();
+  const double terrainDistance1 = terrainHits1.constFirst().distance();
+  QGSCOMPARENEAR( buildingDistance1, 33.59, 1.0 );
+  QGSCOMPARENEAR( terrainDistance1, 45.46, 1.0 );
+
+
+  // clicking on the terrain
+  // the building layer should not be hit
+  const QPoint clickedPoint2( 419, 326 );
+  const QgsRay3D ray2 = Qgs3DUtils::rayFromScreenPoint( clickedPoint2, winSize, camera );
+  const QgsRayCastResult result2 = Qgs3DUtils::castRay( scene, ray2, context );
+
+  const QList< QgsRayCastHit > terrainHits2 = result2.terrainHits();
+  const QList< QgsRayCastHit > allHits2 = result2.allHits();
+  const QList< QgsRayCastHit > buildingsHits2 = result2.layerHits( mLayerBuildings );
+
+  QVERIFY( !result2.hasLayerHits() );
+  QVERIFY( result2.hasTerrainHits() );
+  QCOMPARE( allHits2.size(), 1 );
+  QCOMPARE( terrainHits2.size(), 1 );
+  QCOMPARE( buildingsHits2.size(), 0 );
+
+  const double terrainDistance2 = terrainHits2.constFirst().distance();
+  QGSCOMPARENEAR( terrainDistance2, 45.59, 1.0 );
+
+  delete scene;
+}
+
+void TestQgs3DUtils::testSrgbToLinear_data()
+{
+  QTest::addColumn<QColor>( "srgb" );
+  QTest::addColumn<float>( "red" );
+  QTest::addColumn<float>( "green" );
+  QTest::addColumn<float>( "blue" );
+  QTest::addColumn<float>( "alpha" );
+
+  // values from https://github.com/imazen/linear-srgb/blob/0fe3fddf0a30b7634e23851146fe5933d5cf8b0f/src/const_luts.rs
+  QTest::newRow( "black opaque" ) << QColor( 0, 0, 0, 255 ) << 0.0f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "black transparent" ) << QColor( 0, 0, 0, 0 ) << 0.0f << 0.0f << 0.0f << 0.0f;
+  QTest::newRow( "black semi-transparent" ) << QColor( 0, 0, 0, 125 ) << 0.0f << 0.0f << 0.0f << 0.4901960790f;
+  QTest::newRow( "dark red 1" ) << QColor( 10, 0, 0, 255 ) << 0.00303527f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "dark red 2" ) << QColor( 50, 0, 0, 255 ) << 0.031898525f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "dark red 3" ) << QColor( 100, 0, 0, 255 ) << 0.1274419f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "mid red 1" ) << QColor( 150, 0, 0, 255 ) << 0.30499208f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "light red 1" ) << QColor( 200, 0, 0, 255 ) << 0.5775841f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "light red 2" ) << QColor( 225, 0, 0, 255 ) << 0.75294451f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "light red 3" ) << QColor( 240, 0, 0, 255 ) << 0.87136835f << 0.0f << 0.0f << 1.0f;
+  QTest::newRow( "red" ) << QColor( 255, 0, 0, 255 ) << 1.0f << 0.0f << 0.0f << 1.0f;
+
+  QTest::newRow( "dark green 1" ) << QColor( 0, 10, 0, 255 ) << 0.0f << 0.00303527f << 0.0f << 1.0f;
+  QTest::newRow( "dark green 2" ) << QColor( 0, 50, 0, 255 ) << 0.0f << 0.031898525f << 0.0f << 1.0f;
+  QTest::newRow( "dark green 3" ) << QColor( 0, 100, 0, 255 ) << 0.0f << 0.1274419f << 0.0f << 1.0f;
+  QTest::newRow( "mid green 1" ) << QColor( 0, 150, 0, 255 ) << 0.0f << 0.30499208f << 0.0f << 1.0f;
+  QTest::newRow( "light green 1" ) << QColor( 0, 200, 0, 255 ) << 0.0f << 0.5775841f << 0.0f << 1.0f;
+  QTest::newRow( "light green 2" ) << QColor( 0, 225, 0, 255 ) << 0.0f << 0.75294451f << 0.0f << 1.0f;
+  QTest::newRow( "light green 3" ) << QColor( 0, 240, 0, 255 ) << 0.0f << 0.87136835f << 0.0f << 1.0f;
+  QTest::newRow( "green" ) << QColor( 0, 255, 0, 255 ) << 0.0f << 1.0f << 0.0f << 1.0f;
+
+  QTest::newRow( "dark blue 1" ) << QColor( 0, 0, 10, 255 ) << 0.0f << 0.0f << 0.00303527f << 1.0f;
+  QTest::newRow( "dark blue 2" ) << QColor( 0, 0, 50, 255 ) << 0.0f << 0.0f << 0.031898525f << 1.0f;
+  QTest::newRow( "dark blue 3" ) << QColor( 0, 0, 100, 255 ) << 0.0f << 0.0f << 0.1274419f << 1.0f;
+  QTest::newRow( "mid blue 1" ) << QColor( 0, 0, 150, 255 ) << 0.0f << 0.0f << 0.30499208f << 1.0f;
+  QTest::newRow( "light blue 1" ) << QColor( 0, 0, 200, 255 ) << 0.0f << 0.0f << 0.5775841f << 1.0f;
+  QTest::newRow( "light blue 2" ) << QColor( 0, 0, 225, 255 ) << 0.0f << 0.0f << 0.75294451f << 1.0f;
+  QTest::newRow( "light blue 3" ) << QColor( 0, 0, 240, 255 ) << 0.0f << 0.0f << 0.87136835f << 1.0f;
+  QTest::newRow( "blue" ) << QColor( 0, 0, 255, 255 ) << 0.0f << 0.0f << 1.0f << 1.0f;
+
+  QTest::newRow( "mixed" ) << QColor( 100, 200, 225, 255 ) << 0.1274419f << 0.5775841f << 0.75294451f << 1.0f;
+
+  QTest::newRow( "white" ) << QColor( 255, 255, 255, 255 ) << 1.0f << 1.0f << 1.0f << 1.0f;
+}
+
+void TestQgs3DUtils::testSrgbToLinear()
+{
+  QFETCH( QColor, srgb );
+  QFETCH( float, red );
+  QFETCH( float, green );
+  QFETCH( float, blue );
+  QFETCH( float, alpha );
+
+  const QColor linear = Qgs3DUtils::srgbToLinear( srgb );
+  QGSCOMPARENEAR( linear.redF(), red, 0.0001 );
+  QGSCOMPARENEAR( linear.greenF(), green, 0.0001 );
+  QGSCOMPARENEAR( linear.blueF(), blue, 0.0001 );
+  QGSCOMPARENEAR( linear.alphaF(), alpha, 0.0001 );
+}
+
+void TestQgs3DUtils::testCalculateDirectionalLightUpVector_data()
+{
+  QTest::addColumn<QVector3D>( "lightDirection" );
+  QTest::addColumn<QVector3D>( "expected" );
+
+  QTest::newRow( "horizontal x" ) << QVector3D( 1.0f, 0.0f, 0.0f ).normalized() << QVector3D( 0.0f, 1.0f, 0.0f );
+  QTest::newRow( "angled 45deg" ) << QVector3D( 1.0f, -1.0f, 0.0f ).normalized() << QVector3D( 0.0f, 1.0f, 0.0f );
+  QTest::newRow( "straight down" ) << QVector3D( 0.0f, -1.0f, 0.0f ).normalized() << QVector3D( 0.0f, 0.0f, 1.0f );
+  QTest::newRow( "straight up" ) << QVector3D( 0.0f, 1.0f, 0.0f ).normalized() << QVector3D( 0.0f, 0.0f, 1.0f );
+  QTest::newRow( "almost straight down" ) << QVector3D( 0.0f, -0.995f, 0.099f ).normalized() << QVector3D( 0.0f, 0.0f, 1.0f );
+}
+
+void TestQgs3DUtils::testCalculateDirectionalLightUpVector()
+{
+  QFETCH( QVector3D, lightDirection );
+  QFETCH( QVector3D, expected );
+
+  const QVector3D actualUp = Qgs3DUtils::calculateDirectionalLightUpVector( lightDirection );
+  QGSCOMPARENEARVECTOR3D( actualUp, expected, 0.00001 );
+}
+
+void TestQgs3DUtils::testCalculateCascadeSplits_data()
+{
+  QTest::addColumn<int>( "numberCascades" );
+  QTest::addColumn<float>( "nearPlane" );
+  QTest::addColumn<float>( "farPlane" );
+  QTest::addColumn<float>( "lambda" );
+  QTest::addColumn< QList<float> >( "expectedSplits" );
+
+  QTest::newRow( "2 cascades" ) << 2 << 1.0f << 100.0f << 0.5f << QList<float> { 1.0f, 30.25f, 100.0f };
+  QTest::newRow( "zero near plane no math error" ) << 1 << 0.0f << 100.0f << 1.0f << QList<float> { 0.0f, 100.0f };
+  QTest::newRow( "uniform split" ) << 4 << 0.0f << 100.0f << 0.0f << QList<float> { 0.0f, 25.0f, 50.0f, 75.0f, 100.0f };
+}
+
+void TestQgs3DUtils::testCalculateCascadeSplits()
+{
+  QFETCH( int, numberCascades );
+  QFETCH( float, nearPlane );
+  QFETCH( float, farPlane );
+  QFETCH( float, lambda );
+  QFETCH( QList<float>, expectedSplits );
+
+  const std::vector<float> actualSplits = Qgs3DUtils::calculateCascadeSplits( numberCascades, nearPlane, farPlane, lambda );
+
+  QCOMPARE( static_cast<int>( actualSplits.size() ), expectedSplits.size() );
+  for ( int i = 0; i < expectedSplits.size(); ++i )
+  {
+    QGSCOMPARENEAR( actualSplits[i], expectedSplits[i], 0.001f );
+  }
+}
+
+void TestQgs3DUtils::testCalculateViewSpaceOrthographicBounds_data()
+{
+  QTest::addColumn< QList<QVector3D> >( "cornersList" );
+  QTest::addColumn< QMatrix4x4 >( "viewMatrix" );
+  QTest::addColumn< float >( "expectedLeft" );
+  QTest::addColumn< float >( "expectedRight" );
+  QTest::addColumn< float >( "expectedBottom" );
+  QTest::addColumn< float >( "expectedTop" );
+  QTest::addColumn< float >( "expectedNear" );
+  QTest::addColumn< float >( "expectedFar" );
+
+  QList<QVector3D> standardCube
+    = { QVector3D( -1, -1, -1 ), QVector3D( 1, -1, -1 ), QVector3D( 1, 1, -1 ), QVector3D( -1, 1, -1 ), QVector3D( -1, -1, 1 ), QVector3D( 1, -1, 1 ), QVector3D( 1, 1, 1 ), QVector3D( -1, 1, 1 ) };
+
+  QMatrix4x4 identity;
+
+  QMatrix4x4 translatedView;
+  translatedView.translate( 10.0f, 0.0f, 0.0f );
+
+  QMatrix4x4 rotatedView;
+  rotatedView.rotate( 90.0f, 1.0f, 0.0f, 0.0f );
+
+  QTest::newRow( "identity matrix" ) << standardCube << identity << -1.0f << 1.0f << -1.0f << 1.0f << -1.0f << 1.0f;
+
+  QTest::newRow( "translated matrix" ) << standardCube << translatedView << 9.0f << 11.0f << -1.0f << 1.0f << -1.0f << 1.0f;
+
+  QTest::newRow( "rotated matrix" ) << standardCube << rotatedView << -1.0f << 1.0f << -1.0f << 1.0f << -1.0f << 1.0f;
+}
+
+void TestQgs3DUtils::testCalculateViewSpaceOrthographicBounds()
+{
+  QFETCH( QList<QVector3D>, cornersList );
+  QFETCH( QMatrix4x4, viewMatrix );
+  QFETCH( float, expectedLeft );
+  QFETCH( float, expectedRight );
+  QFETCH( float, expectedBottom );
+  QFETCH( float, expectedTop );
+  QFETCH( float, expectedNear );
+  QFETCH( float, expectedFar );
+
+  QVector3D cornersArray[8];
+  for ( int i = 0; i < 8; ++i )
+  {
+    cornersArray[i] = cornersList[i];
+  }
+
+  float actualLeft = 0;
+  float actualRight = 0;
+  float actualBottom = 0;
+  float actualTop = 0;
+  float actualNear = 0;
+  float actualFar = 0;
+
+  Qgs3DUtils::calculateViewSpaceOrthographicBounds( cornersArray, viewMatrix, actualLeft, actualRight, actualBottom, actualTop, actualNear, actualFar );
+
+  QGSCOMPARENEAR( actualLeft, expectedLeft, 0.0001f );
+  QGSCOMPARENEAR( actualRight, expectedRight, 0.0001f );
+  QGSCOMPARENEAR( actualBottom, expectedBottom, 0.0001f );
+  QGSCOMPARENEAR( actualTop, expectedTop, 0.0001f );
+  QGSCOMPARENEAR( actualNear, expectedNear, 0.0001f );
+  QGSCOMPARENEAR( actualFar, expectedFar, 0.0001f );
+}
+
+void TestQgs3DUtils::testDetermineTextureFormat_data()
+{
+  QTest::addColumn<QImage::Format>( "imageFormat" );
+  QTest::addColumn<bool>( "useSrgbFor8Bit" );
+  QTest::addColumn<Qt3DRender::QAbstractTexture::TextureFormat>( "expectedFormat" );
+  QTest::addColumn<bool>( "expectedRequiresConversion" );
+
+  QTest::newRow( "RGBA32FPx4" ) << QImage::Format_RGBA32FPx4 << false << Qt3DRender::QAbstractTexture::RGBA32F << false;
+  QTest::newRow( "RGBA32FPx4_Premultiplied" ) << QImage::Format_RGBA32FPx4_Premultiplied << true << Qt3DRender::QAbstractTexture::RGBA32F << false;
+  QTest::newRow( "RGBX32FPx4" ) << QImage::Format_RGBX32FPx4 << false << Qt3DRender::QAbstractTexture::RGB32F << false;
+  QTest::newRow( "RGBA16FPx4" ) << QImage::Format_RGBA16FPx4 << false << Qt3DRender::QAbstractTexture::RGBA16F << false;
+  QTest::newRow( "RGBA16FPx4_Premultiplied" ) << QImage::Format_RGBA16FPx4_Premultiplied << true << Qt3DRender::QAbstractTexture::RGBA16F << false;
+  QTest::newRow( "RGBX16FPx4" ) << QImage::Format_RGBX16FPx4 << false << Qt3DRender::QAbstractTexture::RGB16F << false;
+  QTest::newRow( "RGBA8888 sRGB" ) << QImage::Format_RGBA8888 << true << Qt3DRender::QAbstractTexture::SRGB8_Alpha8 << false;
+  QTest::newRow( "RGBA8888 UNorm" ) << QImage::Format_RGBA8888 << false << Qt3DRender::QAbstractTexture::RGBA8_UNorm << false;
+  QTest::newRow( "ARGB32 sRGB" ) << QImage::Format_ARGB32 << true << Qt3DRender::QAbstractTexture::SRGB8_Alpha8 << false;
+  QTest::newRow( "ARGB32_Premultiplied UNorm" ) << QImage::Format_ARGB32_Premultiplied << false << Qt3DRender::QAbstractTexture::RGBA8_UNorm << false;
+  QTest::newRow( "RGB32 sRGB" ) << QImage::Format_RGB32 << true << Qt3DRender::QAbstractTexture::SRGB8 << false;
+  QTest::newRow( "RGB32 UNorm" ) << QImage::Format_RGB32 << false << Qt3DRender::QAbstractTexture::RGB8_UNorm << false;
+  QTest::newRow( "RGB888 sRGB" ) << QImage::Format_RGB888 << true << Qt3DRender::QAbstractTexture::SRGB8 << false;
+  QTest::newRow( "RGB888 UNorm" ) << QImage::Format_RGB888 << false << Qt3DRender::QAbstractTexture::RGB8_UNorm << false;
+  QTest::newRow( "Grayscale8" ) << QImage::Format_Grayscale8 << true << Qt3DRender::QAbstractTexture::R8_UNorm << false;
+  QTest::newRow( "Alpha8" ) << QImage::Format_Alpha8 << false << Qt3DRender::QAbstractTexture::R8_UNorm << false;
+  QTest::newRow( "Grayscale16" ) << QImage::Format_Grayscale16 << true << Qt3DRender::QAbstractTexture::R16_UNorm << false;
+  QTest::newRow( "Invalid format sRGB" ) << QImage::Format_Invalid << true << Qt3DRender::QAbstractTexture::SRGB8_Alpha8 << true;
+  QTest::newRow( "Invalid format UNorm" ) << QImage::Format_Invalid << false << Qt3DRender::QAbstractTexture::RGBA8_UNorm << true;
+  QTest::newRow( "Mono format" ) << QImage::Format_Mono << false << Qt3DRender::QAbstractTexture::RGBA8_UNorm << true;
+  QTest::newRow( "Indexed8 format" ) << QImage::Format_Indexed8 << true << Qt3DRender::QAbstractTexture::SRGB8_Alpha8 << true;
+  QTest::newRow( "RGB16 format" ) << QImage::Format_RGB16 << false << Qt3DRender::QAbstractTexture::RGBA8_UNorm << true;
+  QTest::newRow( "RGBA64 format" ) << QImage::Format_RGBA64 << true << Qt3DRender::QAbstractTexture::SRGB8_Alpha8 << true;
+  QTest::newRow( "BGR888 format" ) << QImage::Format_BGR888 << false << Qt3DRender::QAbstractTexture::RGBA8_UNorm << true;
+}
+
+void TestQgs3DUtils::testDetermineTextureFormat()
+{
+  QFETCH( QImage::Format, imageFormat );
+  QFETCH( bool, useSrgbFor8Bit );
+  QFETCH( Qt3DRender::QAbstractTexture::TextureFormat, expectedFormat );
+  QFETCH( bool, expectedRequiresConversion );
+
+  bool requiresConversionToRgb = false;
+  Qt3DRender::QAbstractTexture::TextureFormat actualFormat = Qgs3DUtils::determineTextureFormat( imageFormat, useSrgbFor8Bit, requiresConversionToRgb );
+
+  QCOMPARE( actualFormat, expectedFormat );
+  QCOMPARE( requiresConversionToRgb, expectedRequiresConversion );
+}
+
+QGSTEST_MAIN( TestQgs3DUtils )
+#include "testqgs3dutils.moc"
