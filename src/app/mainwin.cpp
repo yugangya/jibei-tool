@@ -44,10 +44,70 @@ std::string moduleExeBaseName( void )
   return basename;
 }
 
+void setupPortableEnvironment( const std::string &exePath )
+{
+  const std::string::size_type slash = exePath.find_last_of( "\\/" );
+  if ( slash == std::string::npos )
+    return;
+
+  const std::string binDir = exePath.substr( 0, slash );
+  const std::string::size_type prefixSlash = binDir.find_last_of( "\\/" );
+  if ( prefixSlash == std::string::npos )
+    return;
+  const std::string prefixDir = binDir.substr( 0, prefixSlash );
+  const std::string::size_type packageSlash = prefixDir.find_last_of( "\\/" );
+  if ( packageSlash == std::string::npos )
+    return;
+  const std::string packageDir = prefixDir.substr( 0, packageSlash );
+  const std::string osgeoRoot = packageDir + "\\osgeo4w";
+  const std::string pythonDir = osgeoRoot + "\\apps\\Python312";
+  const std::string qtDir = osgeoRoot + "\\apps\\Qt6";
+
+  // Only activate this fallback for the portable Jianghe package layout.
+  if ( _access( ( prefixDir + "\\python" ).c_str(), 0 ) != 0 ||
+       _access( qtDir.c_str(), 0 ) != 0 ||
+       _access( pythonDir.c_str(), 0 ) != 0 )
+    return;
+
+  const std::string gdalRoot = osgeoRoot + "\\apps\\gdal-dev";
+  const std::string pdalRoot = osgeoRoot + "\\apps\\pdal-dev";
+  const std::string msysRoot = osgeoRoot + "\\apps\\msys";
+  const std::string pluginPath = binDir + "\\qtplugins";
+  const std::string qtPluginPath = qtDir + "\\plugins";
+  const std::string onnxRoot = packageDir + "\\onnxruntime";
+  const char *systemRootEnv = getenv( "SystemRoot" );
+  const std::string systemRoot = systemRootEnv ? systemRootEnv : "C:\\Windows";
+  const std::string path = binDir + ";" + prefixDir + ";" +
+                           osgeoRoot + "\\bin;" + qtDir + "\\bin;" +
+                           gdalRoot + "\\bin;" + pdalRoot + "\\bin;" +
+                           msysRoot + "\\bin;" + pythonDir + ";" +
+                           pythonDir + "\\Scripts;" + pythonDir + "\\DLLs;" +
+                           onnxRoot + "\\lib;" + systemRoot + "\\System32;" +
+                           systemRoot;
+
+  _putenv( ( "QGIS_PREFIX_PATH=" + prefixDir ).c_str() );
+  _putenv( ( "QGIS_PLUGINPATH=" + prefixDir + "\\plugins" ).c_str() );
+  _putenv( ( "QT_PLUGIN_PATH=" + qtPluginPath + ";" + pluginPath ).c_str() );
+  _putenv( ( "QCA_PLUGIN_PATH=" + qtPluginPath + ";" + pluginPath ).c_str() );
+  _putenv( ( "QT_QPA_PLATFORM_PLUGIN_PATH=" + qtPluginPath + "\\platforms" ).c_str() );
+  _putenv( ( "PYTHONHOME=" + pythonDir ).c_str() );
+  _putenv( ( "PYTHONPATH=" + prefixDir + "\\python;" + pythonDir + "\\Lib;" +
+             pythonDir + "\\DLLs;" + pythonDir + "\\Lib\\site-packages;" +
+             packageDir + "\\python-support" ).c_str() );
+  _putenv( "PYTHONNOUSERSITE=1" );
+  _putenv( ( "GDAL_DATA=" + osgeoRoot + "\\share\\gdal" ).c_str() );
+  _putenv( ( "PROJ_DATA=" + osgeoRoot + "\\share\\proj" ).c_str() );
+  _putenv( ( "PROJ_LIB=" + osgeoRoot + "\\share\\proj" ).c_str() );
+  _putenv( ( "PATH=" + path ).c_str() );
+}
+
 int CALLBACK WinMain( HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, LPSTR /*lpCmdLine*/, int /*nCmdShow*/ )
 {
   std::string exename( moduleExeBaseName() );
   std::string basename( exename.substr( 0, exename.size() - 4 ) );
+
+  // Directly double-clicked portable builds need the same environment as the launcher script.
+  setupPortableEnvironment( exename );
 
   if ( getenv( "OSGEO4W_ROOT" ) && __argc == 2 && strcmp( __argv[1], "--postinstall" ) == 0 )
   {

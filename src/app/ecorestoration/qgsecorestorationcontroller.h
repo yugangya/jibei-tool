@@ -129,6 +129,7 @@ class QgsEcoRestorationController final : public QObject
     void normalizeRecognitionResultLayerAfterEdit( QgsVectorLayer *layer );
     void showTowerStyleDialog( QgsVectorLayer *layer );
     QgsRasterLayer *selectedRecognitionRasterLayer() const;
+    QgsVectorLayer *selectedRecognitionTowerLayer() const;
     QString askSmartSegmentationLayerName() const;
     void startSmartSegmentation();
     void startSmartSegmentationForLayer( const QString &layerId );

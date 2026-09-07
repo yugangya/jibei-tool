@@ -24,6 +24,7 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QFutureWatcher>
+#include <QFontMetrics>
 #include <QGraphicsItem>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsObject>
@@ -31,6 +32,7 @@
 #include <QPointer>
 #include <QPromise>
 #include <QStyle>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QEasingCurve>
 #include <QGraphicsPixmapItem>
@@ -139,23 +141,10 @@ namespace
   QString preferredPhotoSam2ModelDirectory()
   {
     const QDir modelsRoot( QDir( QCoreApplication::applicationDirPath() ).filePath( QStringLiteral( "models/sam2-onnx" ) ) );
-    const QStringList candidates = {
-      QStringLiteral( "sam2.1-hiera-large" ),
-      QStringLiteral( "sam2.1-hiera-base_plus" ),
-      QStringLiteral( "sam2.1-hiera-base-plus" ),
-      QStringLiteral( "sam2.1-hiera-small" ),
-      QStringLiteral( "sam2.1-hiera-tiny" )
-    };
+    return modelsRoot.filePath( QStringLiteral( "sam2.1-hiera-large" ) );
+  }
 
-    for ( const QString &candidate : candidates )
-    {
-      const QDir modelDirectory( modelsRoot.filePath( candidate ) );
-      if ( modelDirectory.exists( QStringLiteral( "vision_encoder.onnx" ) ) && modelDirectory.exists( QStringLiteral( "prompt_encoder_mask_decoder.onnx" ) ) )
-        return modelDirectory.absolutePath();
-    }
-
-    return modelsRoot.filePath( QStringLiteral( "sam2.1-hiera-tiny" ) );
-  }  QColor annotationColor( int classId )
+  QColor annotationColor( int classId )
   {
     return classId == 1 ? QColor( QStringLiteral( "#f59e0b" ) ) : QColor( QStringLiteral( "#ef4444" ) );
   }
@@ -217,18 +206,18 @@ namespace
       .arg( background.name(), accent.darker( 115 ).name(), accent.name(), text.toHtmlEscaped() );
   }
 
-  QString photoSummaryHtml( const QString &phaseId, int photoCount, int annotationCount, int autoCount, int manualCount, int fusionCount )
+  QString photoSummaryHtml( const QString &phaseName, int photoCount, int annotationCount, int autoCount, int manualCount, int fusionCount )
   {
-    const QString phaseChip = phaseId.isEmpty()
+    const QString phaseChip = phaseName.isEmpty()
                                 ? photoStatusHtml( QStringLiteral( "未选择期次" ), QColor( QStringLiteral( "#94a3b8" ) ), QColor( QStringLiteral( "#1a2330" ) ) )
-                                : photoStatusHtml( QStringLiteral( "期次 %1" ).arg( phaseId ), QColor( QStringLiteral( "#7dd3fc" ) ), QColor( QStringLiteral( "#122636" ) ) );
+                                : photoStatusHtml( QStringLiteral( "期次 %1" ).arg( phaseName ), QColor( QStringLiteral( "#7dd3fc" ) ), QColor( QStringLiteral( "#122636" ) ) );
     const QString countLine = photoChipHtml( QStringLiteral( "照片" ), QString::number( photoCount ), QColor( QStringLiteral( "#22d3ee" ) ), QColor( QStringLiteral( "#122636" ) ) )
                               + photoChipHtml( QStringLiteral( "标绘" ), QString::number( annotationCount ), QColor( QStringLiteral( "#a78bfa" ) ), QColor( QStringLiteral( "#221933" ) ) )
                               + photoChipHtml( QStringLiteral( "自动" ), QString::number( autoCount ), autoCount > 0 ? QColor( QStringLiteral( "#38bdf8" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), autoCount > 0 ? QColor( QStringLiteral( "#122636" ) ) : QColor( QStringLiteral( "#1a2330" ) ) )
                               + photoChipHtml( QStringLiteral( "人工" ), QString::number( manualCount ), manualCount > 0 ? QColor( QStringLiteral( "#c084fc" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), manualCount > 0 ? QColor( QStringLiteral( "#221933" ) ) : QColor( QStringLiteral( "#1a2330" ) ) )
                               + photoChipHtml( QStringLiteral( "融合" ), QString::number( fusionCount ), fusionCount > 0 ? QColor( QStringLiteral( "#4ade80" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), fusionCount > 0 ? QColor( QStringLiteral( "#132617" ) ) : QColor( QStringLiteral( "#1a2330" ) ) );
     return QStringLiteral( "<div style=\"line-height:1.45;\">"
-                          "<div style=\"color:#94a3b8; margin-bottom:5px;\">照片数据按期次独立存储，原始照片保持不变。</div>"
+                          "<div style=\"color:#94a3b8; margin-bottom:5px;\">照片数据按期次独立存放，原始照片保持不变。</div>"
                           "<div style=\"margin-bottom:2px;\">%1</div>"
                           "<div>%2</div>"
                           "</div>" )
@@ -466,11 +455,11 @@ class PhotoListEntryWidget final : public QWidget
       setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
 
       auto *root = new QHBoxLayout( this );
-      root->setContentsMargins( 14, 12, 14, 12 );
+      root->setContentsMargins( 10, 10, 10, 10 );
       root->setSpacing( 10 );
 
       mThumbnail = new QLabel( this );
-      mThumbnail->setFixedSize( 72, 72 );
+      mThumbnail->setFixedSize( 74, 74 );
       mThumbnail->setAlignment( Qt::AlignCenter );
       mThumbnail->setAttribute( Qt::WA_TransparentForMouseEvents, true );
       mThumbnail->setStyleSheet( QStringLiteral( "background:#223041; border:1px solid #344255; border-radius:10px;" ) );
@@ -490,7 +479,7 @@ class PhotoListEntryWidget final : public QWidget
 
       mNameLabel = new QLabel( this );
       mNameLabel->setAttribute( Qt::WA_TransparentForMouseEvents, true );
-      mNameLabel->setSizePolicy( QSizePolicy::Ignored, QSizePolicy::Preferred );
+      mNameLabel->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
       mNameLabel->setStyleSheet( QStringLiteral( "color:#f6fbff; font-weight:700; font-size:12px;" ) );
       titleStack->addWidget( mNameLabel );
 
@@ -520,10 +509,11 @@ class PhotoListEntryWidget final : public QWidget
       mInfoLabel->setAttribute( Qt::WA_TransparentForMouseEvents, true );
       mInfoLabel->setTextFormat( Qt::RichText );
       mInfoLabel->setWordWrap( false );
-      mInfoLabel->setMinimumHeight( 57 );
-      mInfoLabel->setMaximumHeight( 57 );
+      mInfoLabel->setMinimumHeight( 54 );
+      mInfoLabel->setMaximumHeight( 54 );
       mInfoLabel->setStyleSheet( QStringLiteral( "color:#9aa8b8; font-size:11px;" ) );
-      details->addWidget( mInfoLabel, 1 );      root->addLayout( details, 1 );
+      details->addWidget( mInfoLabel, 1 );
+      root->addLayout( details, 1 );
       updateChrome();
     }
 
@@ -577,9 +567,6 @@ class PhotoListEntryWidget final : public QWidget
         painter.drawRoundedRect( cardRect.adjusted( 0.8, 0.8, -0.8, -0.8 ), 11.0, 11.0 );
       }
 
-      QColor shine( 255, 255, 255, mSelected ? 28 : mHovered ? 18 : 10 );
-      painter.setBrush( shine );
-      painter.drawRoundedRect( cardRect.adjusted( 1.0, 1.0, -1.0, -cardRect.height() * 0.62 ), 12.0, 12.0 );
     }
     void mousePressEvent( QMouseEvent *event ) override { if ( event && event->button() == Qt::LeftButton && mClickCallback ) { mClickCallback(); event->accept(); return; } QWidget::mousePressEvent( event ); }
     void enterEvent( QEnterEvent *event ) override { Q_UNUSED( event ); mHovered = true; updateChrome(); update(); QWidget::enterEvent( event ); }
@@ -908,9 +895,9 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     QWidget#EcoPhotoWorkbench QLabel[previewCard="true"][muted="true"] { color:#aab7c7; }
     QWidget#EcoPhotoWorkbench QFrame[photoPanel="true"] { background:#20242d; border:1px solid #303946; border-radius:6px; }
     QWidget#EcoPhotoWorkbench QListWidget { background:#151a22; color:#d4d4d4; border:1px solid #303946; outline:0; }
-    QWidget#EcoPhotoWorkbench QListWidget::item { min-height:110px; border-bottom:0; padding:6px; }
-    QWidget#EcoPhotoWorkbench QListWidget::item:hover { background:#0d2233; }
-    QWidget#EcoPhotoWorkbench QListWidget::item:selected { background:#103a57; border-left:4px solid #67e8f9; }
+    QWidget#EcoPhotoWorkbench QListWidget::item { min-height:110px; border:0; padding:6px; background:transparent; }
+    QWidget#EcoPhotoWorkbench QListWidget::item:hover { background:transparent; }
+    QWidget#EcoPhotoWorkbench QListWidget::item:selected { background:transparent; border:0; }
     QWidget#EcoPhotoWorkbench QComboBox {
       min-height:28px;
       background:#1e1e1e;
@@ -930,19 +917,21 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       border:1px solid #3c3c3c;
       outline:0;
     }
-    QWidget#EcoPhotoWorkbench QPushButton { min-height:27px; color:#dce8f5; background:#26313d; border:1px solid #405061; border-radius:4px; padding:3px 8px; }
+    QWidget#EcoPhotoWorkbench QPushButton { min-height:27px; color:#dce8f5; background:#26313d; border:1px solid #405061; border-radius:4px; padding:4px 12px; }
     QWidget#EcoPhotoWorkbench QPushButton:hover { background:#304253; border-color:#5b7288; }
     QWidget#EcoPhotoWorkbench QPushButton[primary="true"] { color:#f8fbff; background:#066c9e; border-color:#169bce; font-weight:600; }
     QWidget#EcoPhotoWorkbench QPushButton[primary="true"]:hover { background:#0b7fb5; }
     QWidget#EcoPhotoWorkbench QPushButton:checked { background:#0e639c; border-color:#38bdf8; color:white; }
     QWidget#EcoPhotoWorkbench QPushButton[photoAi="segment"] {
-      min-height:34px;
-      padding:4px 14px;
+      min-height:27px;
+
+      max-width:none;
+      padding:4px 12px;
       color:#effcff;
       background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0f766e, stop:0.55 #0891b2, stop:1 #2563eb);
       border:1px solid #22d3ee;
-      border-radius:17px;
-      font-weight:700;
+      border-radius:4px;
+            font-weight:700;
     }
     QWidget#EcoPhotoWorkbench QPushButton[photoAi="segment"]:hover {
       background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #11998d, stop:0.55 #0ea5e9, stop:1 #3b82f6);
@@ -953,19 +942,55 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       border-color:#99f6e4;
     }
     QWidget#EcoPhotoWorkbench QPushButton[photoAi="recognize"] {
-      min-height:34px;
-      padding:4px 14px;
+      min-height:27px;
+
+      max-width:none;
+      padding:4px 12px;
       color:#fdf7ff;
       background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6d28d9, stop:0.55 #7c3aed, stop:1 #0ea5e9);
       border:1px solid #a855f7;
-      border-radius:17px;
-      font-weight:700;
+      border-radius:4px;
+            font-weight:700;
     }
     QWidget#EcoPhotoWorkbench QPushButton[photoAi="recognize"]:hover {
       background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7c3aed, stop:0.55 #8b5cf6, stop:1 #38bdf8);
       border-color:#c084fc;
     }
-    QWidget#EcoPhotoWorkbench QProgressBar { min-height:9px; max-height:9px; padding:0; color:#e5eef7; background:#0b1220; border:1px solid #273244; border-radius:999px; text-align:center; font-size:9px; }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction] {
+      min-height:27px;
+
+      max-width:none;
+      padding:4px 12px;
+      border-radius:4px;
+      font-weight:700;
+    }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="import"] {
+            color:#effcff;
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0e639c, stop:1 #2563eb);
+      border:1px solid #38bdf8;
+    }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="import"]:hover {
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1177bb, stop:1 #3b82f6);
+      border-color:#67e8f9;
+    }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="segment"] {
+            color:#effcff;
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0f766e, stop:0.55 #0891b2, stop:1 #2563eb);
+      border:1px solid #22d3ee;
+    }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="segment"]:hover {
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #11998d, stop:0.55 #0ea5e9, stop:1 #3b82f6);
+      border-color:#67e8f9;
+    }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="recognize"] {
+            color:#fdf7ff;
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6d28d9, stop:0.55 #7c3aed, stop:1 #0ea5e9);
+      border:1px solid #a855f7;
+    }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="recognize"]:hover {
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7c3aed, stop:0.55 #8b5cf6, stop:1 #38bdf8);
+      border-color:#c084fc;
+    }    QWidget#EcoPhotoWorkbench QProgressBar { min-height:9px; max-height:9px; padding:0; color:#e5eef7; background:#0b1220; border:1px solid #273244; border-radius:999px; text-align:center; font-size:9px; }
     QWidget#EcoPhotoWorkbench QProgressBar::chunk { margin:0; background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #22d3ee, stop:0.55 #3b82f6, stop:1 #8b5cf6); border-radius:999px; }
   )" ) );
 
@@ -978,9 +1003,9 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   QVBoxLayout *contextLayout = new QVBoxLayout( contextPanel );
   contextLayout->setContentsMargins( 10, 8, 10, 8 );
   contextLayout->setSpacing( 3 );
-  mPhaseLabel = new QLabel( tr( "未选择期次" ), contextPanel );
+      mPhaseLabel = new QLabel( tr( "未选择期次" ), contextPanel );
   mPhaseLabel->setStyleSheet( QStringLiteral( "font-weight:650; color:#e5f6ff;" ) );
-  mSummaryLabel = new QLabel( tr( "照片数据按期次独立存储，原始照片保持不变。" ), contextPanel );
+      mSummaryLabel = new QLabel( tr( "照片数据按期次独立存放，原始照片保持不变。" ), contextPanel );
   mSummaryLabel->setProperty( "muted", true );
   mSummaryLabel->setWordWrap( true );
   mSummaryLabel->setTextFormat( Qt::RichText );
@@ -992,13 +1017,14 @@ class EcoPhotoAnnotationView final : public QGraphicsView
 
   QHBoxLayout *actions = new QHBoxLayout;
   actions->setSpacing( 6 );
-  mImportButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionAdd.svg" ) ), tr( "导入照片" ), this );
-  mImportButton->setProperty( "primary", true );
-  mRemoveButton = new QPushButton( tr( "移除所选" ), this );
-  mCreateFusionButton = new QPushButton( tr( "生成融合照片" ), this );
-  mExportOriginalButton = new QPushButton( tr( "导出原图" ), this );
-  mExportFusedButton = new QPushButton( tr( "导出融合图" ), this );
-  mExportYoloButton = new QPushButton( tr( "导出 YOLO 样本" ), this );
+      mImportButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionAdd.svg" ) ), tr( "导入照片" ), this );
+    mImportButton->setProperty( "primary", true );
+  mImportButton->setProperty( "photoAction", "import" );
+      mRemoveButton = new QPushButton( tr( "移除所选" ), this );
+      mCreateFusionButton = new QPushButton( tr( "生成融合照片" ), this );
+      mExportOriginalButton = new QPushButton( tr( "导出原图" ), this );
+      mExportFusedButton = new QPushButton( tr( "导出融合图" ), this );
+      mExportYoloButton = new QPushButton( tr( "导出 YOLO 样本" ), this );
   actions->addWidget( mImportButton );
   actions->addWidget( mRemoveButton );
   actions->addSpacing( 4 );
@@ -1013,7 +1039,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   mPhotoList = new QListWidget( splitter );
   mPhotoList->setIconSize( QSize( sPhotoThumbnailExtent, 64 ) );
   mPhotoList->setSelectionMode( QAbstractItemView::ExtendedSelection );
-  mPhotoList->setMinimumWidth( 190 );
+  mPhotoList->setMinimumWidth( 300 );
 
   QWidget *previewPanel = new QWidget( splitter );
   QVBoxLayout *previewLayout = new QVBoxLayout( previewPanel );
@@ -1023,7 +1049,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   mPreview->setMinimumHeight( 270 );
   previewLayout->addWidget( mPreview, 1 );
 
-  mMetadataLabel = new QLabel( tr( "未选择照片" ), previewPanel );
+    mMetadataLabel = new QLabel( tr( "未选择照片" ), previewPanel );
   mMetadataLabel->setProperty( "muted", true );
   mMetadataLabel->setProperty( "previewCard", true );
   mMetadataLabel->setWordWrap( true );
@@ -1036,36 +1062,51 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   QHBoxLayout *annotationLayout = new QHBoxLayout( annotationPanel );
   annotationLayout->setContentsMargins( 8, 6, 8, 6 );
   annotationLayout->setSpacing( 6 );
-   annotationLayout->addWidget( new QLabel( tr( "图斑类型" ), annotationPanel ) );
+     annotationLayout->addWidget( new QLabel( tr( "图斑类型" ), annotationPanel ) );
   mAnnotationClassCombo = new QComboBox( annotationPanel );
   mAnnotationClassCombo->addItem( classColorIcon( annotationColor( 0 ) ), photoClassName( 0 ), 0 );
   mAnnotationClassCombo->addItem( classColorIcon( annotationColor( 1 ) ), photoClassName( 1 ), 1 );
   mAnnotationClassCombo->setIconSize( QSize( 14, 14 ) );
   annotationLayout->addWidget( mAnnotationClassCombo );
-   mManualDrawButton = new QPushButton( tr( "标绘图斑" ), annotationPanel );
-   mPhotoSmartSegmentationButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionVertexTool.svg" ) ), tr( "智能分割" ), annotationPanel );
-  mPhotoSmartSegmentationButton->setProperty( "photoAi", "segment" );
+     mManualDrawButton = new QPushButton( tr( "标绘图斑" ), annotationPanel );
+            mPhotoSmartSegmentationButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionVertexTool.svg" ) ), tr( "智能分割" ), annotationPanel );
+    mPhotoSmartSegmentationButton->setProperty( "photoAi", "segment" );
+  mPhotoSmartSegmentationButton->setProperty( "photoAction", "segment" );
   mPhotoSmartSegmentationButton->setIconSize( QSize( 16, 16 ) );
   mPhotoSmartSegmentationButton->setCheckable( true );
-   mPhotoSmartSegmentationButton->setToolTip( tr( "左键添加红点，右键添加蓝点，按空格可拖动图片。" ) );
+     mPhotoSmartSegmentationButton->setToolTip( tr( "左键添加红点，右键添加蓝点，按空格可拖动图片。" ) );
   mManualDrawButton->setCheckable( true );
    mManualDrawButton->setToolTip( tr( "左键添加点，Ctrl+Z 撤销上一个点，双击完成。" ) );
-    mEditAnnotationButton = new QPushButton( tr( "编辑结果" ), annotationPanel );
+        mEditAnnotationButton = new QPushButton( tr( "编辑结果" ), annotationPanel );
   mEditAnnotationButton->setCheckable( true );
-   mEditAnnotationButton->setToolTip( tr( "点击图斑后可拖动顶点编辑，双击边可新增点，右键顶点可删除点。" ) );
-    mDeleteAnnotationButton = new QPushButton( tr( "删除标绘" ), annotationPanel );
+     mEditAnnotationButton->setToolTip( tr( "点击图斑后可拖动顶点编辑，双击边可新增点，右键顶点可删除点。" ) );
+        mDeleteAnnotationButton = new QPushButton( tr( "删除标绘" ), annotationPanel );
   mDeleteAnnotationButton->setCheckable( true );
-    mDeleteAnnotationButton->setToolTip( tr( "点击后在图片上单击图斑即可删除。" ) );
+        mDeleteAnnotationButton->setToolTip( tr( "点击后在图片上单击图斑即可删除。" ) );
   annotationLayout->addWidget( mManualDrawButton );
   annotationLayout->addWidget( mDeleteAnnotationButton );
   annotationLayout->addWidget( mEditAnnotationButton );
   annotationLayout->addStretch( 1 );
-  mPhotoRecognitionButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionIdentify.svg" ) ), tr( "照片智能识别" ), annotationPanel );
-  mPhotoRecognitionButton->setProperty( "primary", true );
-  mPhotoRecognitionButton->setProperty( "photoAi", "recognize" );
+        mPhotoRecognitionButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionIdentify.svg" ) ), tr( "照片智能识别" ), annotationPanel );
+    mPhotoRecognitionButton->setProperty( "primary", true );
+  mPhotoRecognitionButton->setProperty( "photoAction", "recognize" );
+    mPhotoRecognitionButton->setProperty( "photoAi", "recognize" );
   mPhotoRecognitionButton->setIconSize( QSize( 16, 16 ) );
-  mPhotoRecognitionButton->setMinimumWidth( 180 );
-  mPhotoRecognitionButton->setToolTip( tr( "批量识别当前期次勾选的照片。" ) );
+
+    mPhotoRecognitionButton->setToolTip( tr( "批量识别当前期次勾选的照片。" ) );
+  const auto widenPhotoActionButton = []( QPushButton *button ) {
+    if ( !button )
+      return;
+    const int textWidth = button->fontMetrics().horizontalAdvance( button->text() );
+    const int iconWidth = button->icon().isNull() ? 0 : button->iconSize().width() + 8;
+    const int horizontalPadding = 38;
+    button->setSizePolicy( QSizePolicy::Minimum, QSizePolicy::Fixed );
+    button->setMinimumWidth( textWidth + iconWidth + horizontalPadding );
+    button->setMaximumWidth( QWIDGETSIZE_MAX );
+  };
+  widenPhotoActionButton( mImportButton );
+  widenPhotoActionButton( mPhotoSmartSegmentationButton );
+  widenPhotoActionButton( mPhotoRecognitionButton );
   annotationLayout->addWidget( mPhotoSmartSegmentationButton );
   annotationLayout->addWidget( mPhotoRecognitionButton );
   previewLayout->addWidget( annotationPanel );
@@ -1074,7 +1115,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   splitter->addWidget( previewPanel );
   splitter->setStretchFactor( 0, 0 );
   splitter->setStretchFactor( 1, 1 );
-  splitter->setSizes( { 245, 575 } );
+  splitter->setSizes( { 300, 540 } );
 
   QWidget *originalTab = new QWidget( this );
   QVBoxLayout *originalLayout = new QVBoxLayout( originalTab );
@@ -1090,7 +1131,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   mFusedList = new QListWidget( fusedSplitter );
   mFusedList->setIconSize( QSize( sPhotoThumbnailExtent, 64 ) );
   mFusedList->setSelectionMode( QAbstractItemView::SingleSelection );
-  mFusedList->setMinimumWidth( 190 );
+  mFusedList->setMinimumWidth( 300 );
 
   QWidget *fusedPreviewPanel = new QWidget( fusedSplitter );
   QVBoxLayout *fusedPreviewLayout = new QVBoxLayout( fusedPreviewPanel );
@@ -1110,17 +1151,66 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   fusedSplitter->addWidget( fusedPreviewPanel );
   fusedSplitter->setStretchFactor( 0, 0 );
   fusedSplitter->setStretchFactor( 1, 1 );
-  fusedSplitter->setSizes( { 245, 575 } );
+  fusedSplitter->setSizes( { 300, 540 } );
   fusedTabLayout->addWidget( fusedSplitter, 1 );
 
   mPhotoTabs = new QTabWidget( this );
-   mPhotoTabs->addTab( originalTab, tr( "原图列表" ) );
-   mPhotoTabs->addTab( fusedTab, tr( "融合结果" ) );
+  mPhotoTabs->setDocumentMode( true );
+  mPhotoTabs->setElideMode( Qt::ElideNone );
+  mPhotoTabs->setUsesScrollButtons( false );
+  mPhotoTabs->tabBar()->setExpanding( true );
+  mPhotoTabs->setStyleSheet( QStringLiteral( R"(
+    QTabWidget::pane {
+      background:#0f1622;
+      border:1px solid #284055;
+      border-radius:12px;
+      top:-1px;
+    }
+    QTabBar {
+      qproperty-drawBase:0;
+    }
+    QTabBar::tab {
+
+      padding:6px 10px;
+      margin-right:6px;
+      color:#9fb0c1;
+      background:#141b28;
+      border:1px solid #284055;
+      border-bottom:none;
+      border-top-left-radius:10px;
+      border-top-right-radius:10px;
+      font-weight:600;
+    }
+    QTabBar::tab:hover {
+      color:#ffffff;
+      background:#1f2b3b;
+    }
+    QTabBar::tab:selected {
+      color:#ffffff;
+      background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0e639c, stop:1 #1d4ed8);
+      border-color:#38bdf8;
+    }
+  )" ) );
+            mPhotoTabs->addTab( originalTab, tr( "原图列表" ) );
+            mPhotoTabs->addTab( fusedTab, tr( "融合结果" ) );
   layout->addWidget( mPhotoTabs, 1 );
+
+  const auto syncPhotoTabBarWidth = [this, splitter, fusedSplitter]() {
+    if ( !mPhotoTabs )
+      return;
+    QSplitter *activeSplitter = mPhotoTabs->currentIndex() == 1 ? fusedSplitter : splitter;
+    const int listWidth = activeSplitter ? activeSplitter->sizes().value( 0, 0 ) : 0;
+    if ( listWidth > 0 )
+      mPhotoTabs->tabBar()->setFixedWidth( listWidth );
+  };
+  connect( splitter, &QSplitter::splitterMoved, this, [syncPhotoTabBarWidth]( int, int ) { syncPhotoTabBarWidth(); } );
+  connect( fusedSplitter, &QSplitter::splitterMoved, this, [syncPhotoTabBarWidth]( int, int ) { syncPhotoTabBarWidth(); } );
+  connect( mPhotoTabs, &QTabWidget::currentChanged, this, [syncPhotoTabBarWidth]( int ) { syncPhotoTabBarWidth(); } );
+  QTimer::singleShot( 0, this, syncPhotoTabBarWidth );
   mProgressBar = new QProgressBar( this );
   mProgressBar->setVisible( false );
   mProgressBar->setTextVisible( true );
-  mStatusLabel = new QLabel( tr( "就绪" ), this );
+    mStatusLabel = new QLabel( tr( "就绪" ), this );
   mStatusLabel->setProperty( "muted", true );
   layout->addWidget( mProgressBar );
   layout->addWidget( mStatusLabel );
@@ -1433,7 +1523,7 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
   {
     QListWidgetItem *item = new QListWidgetItem();
     item->setData( Qt::UserRole, index );
-    item->setSizeHint( QSize( 190, 132 ) );
+    item->setSizeHint( QSize( 300, 132 ) );
     mPhotoList->addItem( item );
     auto *entry = new PhotoListEntryWidget( mPhotoList, true );
     entry->onClicked( [this, index] {
@@ -1604,7 +1694,7 @@ void QgsEcoPhotoWorkbench::rebuildFusedList()
       firstRow = row;
     QListWidgetItem *item = new QListWidgetItem();
     item->setData( Qt::UserRole, index );
-    item->setSizeHint( QSize( 190, 132 ) );
+    item->setSizeHint( QSize( 300, 132 ) );
     mFusedList->addItem( item );
     auto *entry = new PhotoListEntryWidget( mFusedList, false );
     entry->setCheckable( false );
@@ -1690,7 +1780,7 @@ void QgsEcoPhotoWorkbench::updateSummary()
       ++fusionCount;
   }
 
-  mSummaryLabel->setText( photoSummaryHtml( mPhaseId, mPhotos.size(), annotationCount, autoCount, manualCount, fusionCount ) );
+  mSummaryLabel->setText( photoSummaryHtml( mPhaseName, mPhotos.size(), annotationCount, autoCount, manualCount, fusionCount ) );
 }
 void QgsEcoPhotoWorkbench::setBusy( bool busy, const QString &status )
 {

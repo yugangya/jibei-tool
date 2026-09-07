@@ -70,7 +70,15 @@ if os.name == "nt":
     if sys.version_info[0] > 3 or (
         sys.version_info[0] == 3 and sys.version_info[1] >= 9
     ):
-        for p in os.getenv("PATH").split(";"):
+        for p in os.getenv("PATH", "").split(";"):
+            p = p.strip()
+            if not p:
+                continue
+            # os.add_dll_directory only accepts absolute paths. Portable and
+            # user PATH values may legitimately contain relative entries such
+            # as ".", which would otherwise break PyQGIS imports.
+            if not os.path.isabs(p):
+                continue
             if os.path.exists(p):
                 os.add_dll_directory(p)
 

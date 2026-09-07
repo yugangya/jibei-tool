@@ -715,30 +715,8 @@ if(EXISTS "${ECO_SAM2_LARGE_ENCODER_MODEL}" AND EXISTS "${ECO_SAM2_LARGE_DECODER
   )
 endif()
 
-set(ECO_SAM2_TINY_ONNX_MODEL_DIR "${PROJECT_SOURCE_DIR}/models/sam2-onnx/sam2.1-hiera-tiny")
-set(ECO_SAM2_TINY_ENCODER_MODEL "${ECO_SAM2_TINY_ONNX_MODEL_DIR}/vision_encoder.onnx")
-set(ECO_SAM2_TINY_DECODER_MODEL "${ECO_SAM2_TINY_ONNX_MODEL_DIR}/prompt_encoder_mask_decoder.onnx")
-if(EXISTS "${ECO_SAM2_TINY_ENCODER_MODEL}" AND EXISTS "${ECO_SAM2_TINY_DECODER_MODEL}")
-  set(ECO_SAM2_HAS_BUNDLED_MODELS TRUE)
-  add_custom_command(TARGET qgis_app POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:qgis_app>/models/sam2-onnx/sam2.1-hiera-tiny"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${ECO_SAM2_TINY_ENCODER_MODEL}"
-      "$<TARGET_FILE_DIR:qgis_app>/models/sam2-onnx/sam2.1-hiera-tiny/vision_encoder.onnx"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${ECO_SAM2_TINY_DECODER_MODEL}"
-      "$<TARGET_FILE_DIR:qgis_app>/models/sam2-onnx/sam2.1-hiera-tiny/prompt_encoder_mask_decoder.onnx"
-    COMMENT "Copying integrated intelligent segmentation models (tiny)"
-  )
-  install(FILES
-    "${ECO_SAM2_TINY_ENCODER_MODEL}"
-    "${ECO_SAM2_TINY_DECODER_MODEL}"
-    DESTINATION "${QGIS_BIN_DIR}/models/sam2-onnx/sam2.1-hiera-tiny"
-  )
-endif()
-
 if(NOT ECO_SAM2_HAS_BUNDLED_MODELS)
-  message(WARNING "Integrated SAM2 ONNX models are missing: expected sam2.1-hiera-large and/or sam2.1-hiera-tiny under ${PROJECT_SOURCE_DIR}/models/sam2-onnx")
+  message(WARNING "Integrated SAM2 ONNX models are missing: expected sam2.1-hiera-large under ${PROJECT_SOURCE_DIR}/models/sam2-onnx")
 endif()
 
 # Keep the authentication provider available when qgis.exe is launched directly.

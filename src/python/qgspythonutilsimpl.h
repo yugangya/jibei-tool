@@ -138,6 +138,7 @@ class QgsPythonUtilsImpl : public QgsPythonUtils
 
   private:
     bool mErrorHookInstalled = false;
+    bool mSuppressStartupErrorDialogs = false;
     QString mFaultHandlerLogPath;
 };
 

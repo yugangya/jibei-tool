@@ -16,6 +16,7 @@
 #include <QVector>
 
 #include <algorithm>
+#include <cstdint>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -286,12 +287,12 @@ namespace
 #endif
 
       if ( encoder->GetInputCount() != 1 || decoder->GetInputCount() < 5 )
-        return QStringLiteral( "智能分割模型结构不完整。" );
+        return QStringLiteral( "SAM2 decoder is not available in this build." );
 
       Ort::AllocatorWithDefaultOptions allocator;
       const std::vector<int64_t> inputShape = encoder->GetInputTypeInfo( 0 ).GetTensorTypeAndShapeInfo().GetShape();
       if ( inputShape.size() != 4 || inputShape[1] != 3 || inputShape[2] <= 0 || inputShape[3] <= 0 )
-        return QStringLiteral( "智能分割模型必须是 RGB 图像编码器。" );
+        return QStringLiteral( "SAM2 encoder input must be 4D RGB." );
 
       Sam2SessionCache loaded;
       loaded.encoderPath = encoderPath;
@@ -313,7 +314,7 @@ namespace
     }
     catch ( const Ort::Exception &exception )
     {
-      return QStringLiteral( "智能分割模型加载失败：%1" ).arg( QString::fromUtf8( exception.what() ) );
+      return QStringLiteral( "闁哄懘缂氶崗姗€宕氶崱妤€顥忔俊顖椻偓宕団偓鐑藉礉閻樼儤绁板鎯扮簿鐟欙箓鏁?1" ).arg( QString::fromUtf8( exception.what() ) );
     }
   }
 
@@ -333,6 +334,7 @@ namespace
   {
     std::vector<float> floats;
     std::vector<int64_t> integers;
+    std::vector<int32_t> int32s;
     std::vector<int64_t> shape;
   };
 
@@ -365,23 +367,23 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
 #ifndef HAVE_ONNXRUNTIME
   Q_UNUSED( rasterLayer )
   Q_UNUSED( parameters )
-  result.error = QStringLiteral( "当前构建未链接智能分割组件。" );
+  result.error = QStringLiteral( "SAM2 is not enabled in this build." );
   return result;
 #else
   const bool useImageInput = !parameters.inputImage.isNull();
   if ( !useImageInput && ( !rasterLayer || !rasterLayer->isValid() ) )
   {
-    result.error = QStringLiteral( "请先选择有效的影像图层。" );
+    result.error = QStringLiteral( "Please select a valid raster layer first." );
     return result;
   }
   if ( useImageInput && parameters.inputImage.isNull() )
   {
-    result.error = QStringLiteral( "照片输入无效。" );
+    result.error = QStringLiteral( "Invalid photo input." );
     return result;
   }
   if ( !QFileInfo::exists( parameters.encoderModelPath ) || !QFileInfo::exists( parameters.decoderModelPath ) )
   {
-    result.error = QStringLiteral( "智能分割组件尚未准备完成。" );
+    result.error = QStringLiteral( "SAM2 model files are not ready." );
     return result;
   }
 
@@ -389,7 +391,7 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
   const QgsRectangle cropExtent = useImageInput ? inputExtent : parameters.cropExtent.intersect( inputExtent );
   if ( cropExtent.isEmpty() )
   {
-    result.error = QStringLiteral( "所选范围不在影像覆盖范围内。" );
+    result.error = QStringLiteral( "Selected extent is outside the image bounds." );
     return result;
   }
   QVector<QgsPointXY> pointPrompts = parameters.promptPoints;
@@ -401,12 +403,12 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
 
   if ( parameters.promptMode == PromptMode::Point && pointPrompts.isEmpty() )
   {
-    result.error = QStringLiteral( "缺少智能分割提示点。" );
+    result.error = QStringLiteral( "Missing SAM2 prompt points." );
     return result;
   }
   if ( parameters.promptMode == PromptMode::Point && std::any_of( pointPrompts.cbegin(), pointPrompts.cend(), [&cropExtent]( const QgsPointXY &point ) { return !cropExtent.contains( point ); } ) )
   {
-    result.error = QStringLiteral( "提示点不在当前影像范围内。" );
+    result.error = QStringLiteral( "Prompt points are outside the current image extent." );
     return result;
   }
 
@@ -442,7 +444,7 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
     }
     if ( image.isNull() )
     {
-      result.error = QStringLiteral( "无法读取当前影像范围。" );
+    result.error = QStringLiteral( "Unable to read the current image extent." );
       return result;
     }
 
@@ -476,13 +478,14 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
 
     if ( encoderOutputs.size() != cache.encoderOutputNames.size() )
     {
-      result.error = QStringLiteral( "智能分割编码结果异常。" );
+      result.error = QStringLiteral( "SAM2 encoder produced an unexpected result." );
       return result;
     }
 
     const int pointCount = parameters.promptMode == PromptMode::Point ? pointPrompts.size() : 2;
     std::vector<float> promptCoordinates;
     std::vector<int64_t> promptLabels;
+    std::vector<int32_t> promptLabels32;
     if ( parameters.promptMode == PromptMode::Point )
     {
       promptCoordinates.reserve( static_cast<size_t>( pointCount ) * 2 );
@@ -500,7 +503,7 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
       const QgsRectangle promptBox = parameters.promptBox.intersect( cropExtent );
       if ( promptBox.isEmpty() )
       {
-        result.error = QStringLiteral( "框选范围不在当前影像范围内。" );
+        result.error = QStringLiteral( "Prompt box is outside the current image extent." );
         return result;
       }
       const QgsPointXY topLeft( promptBox.xMinimum(), promptBox.yMaximum() );
@@ -513,6 +516,9 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
       };
       promptLabels = { 2, 3 };
     }
+    promptLabels32.reserve( promptLabels.size() );
+    for ( int64_t label : promptLabels )
+      promptLabels32.push_back( static_cast<int32_t>( label ) );
 
     std::unordered_map<std::string, size_t> encoderOutputIndexes;
     for ( size_t index = 0; index < cache.encoderOutputNames.size(); ++index )
@@ -541,32 +547,105 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
         memoryInfo, tensor.integers.data(), tensor.integers.size(), tensor.shape.data(), tensor.shape.size()
       ) );
     };
+    const auto appendInt32Tensor = [&memoryInfo, &storage, &decoderInputValues]( std::vector<int32_t> values, std::vector<int64_t> shape ) {
+      TensorStorage &tensor = storage.emplace_back();
+      tensor.int32s = std::move( values );
+      tensor.shape = std::move( shape );
+      decoderInputValues.emplace_back( Ort::Value::CreateTensor<int32_t>(
+        memoryInfo, tensor.int32s.data(), tensor.int32s.size(), tensor.shape.data(), tensor.shape.size()
+      ) );
+    };
 
-    for ( const std::string &name : std::as_const( cache.decoderInputNames ) )
+    for ( size_t index = 0; index < cache.decoderInputNames.size(); ++index )
     {
+      const std::string &name = cache.decoderInputNames[index];
       decoderInputNames.push_back( name.c_str() );
-      if ( name == "input_points" )
+      const auto inputInfo = cache.decoder->GetInputTypeInfo( index ).GetTensorTypeAndShapeInfo();
+      const std::vector<int64_t> inputShape = inputInfo.GetShape();
+
+      if ( name == "input_points" || name == "point_coords" || name == "point_coordinates" )
       {
-        appendFloatTensor( promptCoordinates, { 1, 1, pointCount, 2 } );
+        const std::vector<int64_t> coordsShape = inputShape.size() >= 4
+                                                   ? std::vector<int64_t>{ 1, 1, pointCount, 2 }
+                                                   : inputShape.size() == 3
+                                                     ? std::vector<int64_t>{ 1, pointCount, 2 }
+                                                     : std::vector<int64_t>{ pointCount, 2 };
+        appendFloatTensor( promptCoordinates, coordsShape );
       }
-      else if ( name == "input_labels" )
+      else if ( name == "input_labels" || name == "point_labels" )
       {
-        appendInt64Tensor( promptLabels, { 1, 1, pointCount } );
+        const std::vector<int64_t> labelShape = inputShape.size() >= 3
+                                                  ? std::vector<int64_t>{ 1, 1, pointCount }
+                                                  : inputShape.size() == 2
+                                                    ? std::vector<int64_t>{ 1, pointCount }
+                                                    : std::vector<int64_t>{ pointCount };
+        if ( inputInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 )
+          appendInt32Tensor( promptLabels32, labelShape );
+        else
+          appendInt64Tensor( promptLabels, labelShape );
       }
-      else if ( name == "input_masks" )
+      else if ( name == "input_masks" || name == "mask_input" )
       {
-        appendFloatTensor( std::vector<float>( 256 * 256, 0.0f ), { 1, 1, 256, 256 } );
+        const std::vector<int64_t> maskShape = inputShape.size() >= 4
+                                                 ? std::vector<int64_t>{ 1, 1, 256, 256 }
+                                                 : inputShape.size() == 3
+                                                   ? std::vector<int64_t>{ 1, 256, 256 }
+                                                   : std::vector<int64_t>{ 1, 1, 256, 256 };
+        if ( inputInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 )
+          appendInt64Tensor( std::vector<int64_t>( 256 * 256, 0 ), maskShape );
+        else if ( inputInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 )
+          appendInt32Tensor( std::vector<int32_t>( 256 * 256, 0 ), maskShape );
+        else
+          appendFloatTensor( std::vector<float>( 256 * 256, 0.0f ), maskShape );
       }
-      else if ( name == "has_mask_input" )
+      else if ( name == "has_mask_input" || name == "has_input_masks" )
       {
-        appendFloatTensor( { 0.0f }, { 1 } );
+        const std::vector<int64_t> maskFlagShape = inputShape.size() >= 2 ? std::vector<int64_t>{ 1, 1 } : std::vector<int64_t>{ 1 };
+        switch ( inputInfo.GetElementType() )
+        {
+          case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+            appendInt64Tensor( { 0 }, maskFlagShape );
+            break;
+          case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+            appendInt32Tensor( { 0 }, maskFlagShape );
+            break;
+          default:
+            appendFloatTensor( { 0.0f }, maskFlagShape );
+            break;
+        }
+      }
+      else if ( name == "original_image_size" || name == "ori_image_size" || name == "image_size" )
+      {
+        const QSize originalImageSize = useImageInput ? parameters.inputImage.size() : QSize( cache.inputWidth, cache.inputHeight );
+        const std::vector<int64_t> sizeShape = inputShape.size() >= 2 ? std::vector<int64_t>{ 1, 2 } : std::vector<int64_t>{ 2 };
+        switch ( inputInfo.GetElementType() )
+        {
+          case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+            appendInt32Tensor(
+              { static_cast<int32_t>( originalImageSize.height() ), static_cast<int32_t>( originalImageSize.width() ) },
+              sizeShape
+            );
+            break;
+          case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+            appendFloatTensor(
+              { static_cast<float>( originalImageSize.height() ), static_cast<float>( originalImageSize.width() ) },
+              sizeShape
+            );
+            break;
+          default:
+            appendInt64Tensor(
+              { static_cast<int64_t>( originalImageSize.height() ), static_cast<int64_t>( originalImageSize.width() ) },
+              sizeShape
+            );
+            break;
+        }
       }
       else
       {
         const auto encoderOutput = encoderOutputIndexes.find( name );
         if ( encoderOutput == encoderOutputIndexes.end() )
         {
-          result.error = QStringLiteral( "智能分割模型输入不匹配。" );
+          result.error = QStringLiteral( "SAM2 decoder input is missing a required encoder output." );
           return result;
         }
         decoderInputValues.emplace_back( std::move( encoderOutputs[encoderOutput->second] ) );
@@ -577,6 +656,7 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
     decoderOutputNames.reserve( cache.decoderOutputNames.size() );
     for ( const std::string &name : std::as_const( cache.decoderOutputNames ) )
       decoderOutputNames.push_back( name.c_str() );
+
     std::vector<Ort::Value> decoderOutputs = runWithUiEvents( [&cache, &decoderInputNames, &decoderInputValues, &decoderOutputNames] {
       return cache.decoder->Run(
         Ort::RunOptions { nullptr },
@@ -586,18 +666,26 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
     } );
 
     int maskOutputIndex = -1;
+    int fallbackMaskOutputIndex = -1;
     int scoreOutputIndex = -1;
     for ( int index = 0; index < static_cast<int>( cache.decoderOutputNames.size() ); ++index )
     {
       const QString name = QString::fromStdString( cache.decoderOutputNames[static_cast<size_t>( index )] ).toLower();
-      if ( name.contains( QStringLiteral( "mask" ) ) && !name.contains( QStringLiteral( "low" ) ) )
-        maskOutputIndex = index;
+      if ( name.contains( QStringLiteral( "mask" ) ) )
+      {
+        if ( !name.contains( QStringLiteral( "low" ) ) && maskOutputIndex < 0 )
+          maskOutputIndex = index;
+        if ( fallbackMaskOutputIndex < 0 )
+          fallbackMaskOutputIndex = index;
+      }
       if ( name.contains( QStringLiteral( "iou" ) ) || name.contains( QStringLiteral( "score" ) ) || name.contains( QStringLiteral( "quality" ) ) )
         scoreOutputIndex = index;
     }
+    if ( maskOutputIndex < 0 )
+      maskOutputIndex = fallbackMaskOutputIndex;
     if ( maskOutputIndex < 0 || maskOutputIndex >= static_cast<int>( decoderOutputs.size() ) )
     {
-      result.error = QStringLiteral( "智能分割没有返回有效图斑。" );
+      result.error = QStringLiteral( "SAM2 decoder did not return a valid mask." );
       return result;
     }
 
@@ -628,32 +716,74 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
     const Ort::Value &maskOutput = decoderOutputs[maskOutputIndex];
     if ( !maskOutput.IsTensor() )
     {
-      result.error = QStringLiteral( "智能分割图斑格式异常。" );
-      return result;
-    }
-    const auto maskInfo = maskOutput.GetTensorTypeAndShapeInfo();
-    const std::vector<int64_t> maskShape = maskInfo.GetShape();
-    if ( maskInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || maskShape.size() != 4
-         || maskShape[1] <= 0 || maskShape[2] <= 0 || maskShape[3] <= 0 )
-    {
-      result.error = QStringLiteral( "智能分割图斑尺寸异常。" );
+      result.error = QStringLiteral( "SAM2 decoder output is not a tensor." );
       return result;
     }
 
-    result.geometry = maskToGeometry(
-      maskOutput.GetTensorData<float>(),
-      static_cast<int>( maskShape[1] ),
-      static_cast<int>( maskShape[2] ),
-      static_cast<int>( maskShape[3] ),
-      bestMask,
-      useImageInput,
-      cropExtent
-    );
-    if ( result.geometry.isNull() || result.geometry.isEmpty() )
+    const auto maskInfo = maskOutput.GetTensorTypeAndShapeInfo();
+    const std::vector<int64_t> maskShape = maskInfo.GetShape();
+    if ( maskShape.size() < 3 || maskShape.size() > 4 )
     {
-      result.error = QStringLiteral( "没有生成有效边界，请改用框选或调整点位。" );
+      result.error = QStringLiteral( "SAM2 mask rank is invalid." );
       return result;
     }
+    const int maskCount = maskShape.size() == 4 ? static_cast<int>( maskShape[1] ) : static_cast<int>( maskShape[0] );
+    const int maskHeight = maskShape.size() == 4 ? static_cast<int>( maskShape[2] ) : static_cast<int>( maskShape[1] );
+    const int maskWidth = maskShape.size() == 4 ? static_cast<int>( maskShape[3] ) : static_cast<int>( maskShape[2] );
+    if ( maskCount <= 0 || maskHeight <= 0 || maskWidth <= 0 )
+    {
+      result.error = QStringLiteral( "SAM2 mask dimensions are invalid." );
+      return result;
+    }
+
+    if ( maskInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT )
+    {
+      result.geometry = maskToGeometry(
+        maskOutput.GetTensorData<float>(),
+        maskCount,
+        maskHeight,
+        maskWidth,
+        bestMask,
+        useImageInput,
+        cropExtent
+      );
+    }
+    else if ( maskInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL )
+    {
+      const bool *maskData = maskOutput.GetTensorData<bool>();
+      if ( !maskData )
+      {
+        result.error = QStringLiteral( "SAM2 mask data is empty." );
+        return result;
+      }
+      const size_t planeSize = static_cast<size_t>( maskHeight ) * maskWidth;
+      const int selectedMask = std::clamp( bestMask, 0, maskCount - 1 );
+      const bool *selectedMaskData = maskData + static_cast<size_t>( selectedMask ) * planeSize;
+      std::vector<float> selectedMaskPlane( planeSize );
+      for ( size_t i = 0; i < planeSize; ++i )
+        selectedMaskPlane[i] = selectedMaskData[i] ? 1.0f : 0.0f;
+      result.geometry = maskToGeometry(
+        selectedMaskPlane.data(),
+        1,
+        maskHeight,
+        maskWidth,
+        0,
+        useImageInput,
+        cropExtent
+      );
+    }
+    else
+    {
+      result.error = QStringLiteral( "Current SAM2 model output type is not supported." );
+      return result;
+    }
+
+    if ( result.geometry.isNull() || result.geometry.isEmpty() )
+    {
+      result.error = QStringLiteral( "No valid geometry was generated." );
+      return result;
+    }
+
     result.success = true;
     result.score = std::clamp( bestScore, 0.0, 1.0 );
     result.cropExtent = cropExtent;
@@ -661,14 +791,14 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
   }
   catch ( const Ort::Exception &exception )
   {
-    result.error = QStringLiteral( "智能分割暂不可用。" );
     Q_UNUSED( exception )
+    result.error = QStringLiteral( "SAM2 is temporarily unavailable." );
     return result;
   }
   catch ( const std::exception &exception )
   {
-    result.error = QStringLiteral( "智能分割暂不可用。" );
     Q_UNUSED( exception )
+    result.error = QStringLiteral( "SAM2 is temporarily unavailable." );
     return result;
   }
 #endif

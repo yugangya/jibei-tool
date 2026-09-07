@@ -6062,6 +6062,11 @@ bool QgisApp::createBlankProjectForIntegratedWorkflow()
   return true;
 }
 
+bool QgisApp::saveProjectForIntegratedWorkflow()
+{
+  return fileSave();
+}
+
 void QgisApp::fileClose()
 {
   if ( fileNewBlank() )
@@ -12699,8 +12704,12 @@ void QgisApp::loadPythonSupport()
 #endif
     mPythonUtils->initPython( mQgisInterface, true, QgsCrashHandler::sPythonCrashLogFile );
 
-    // do not permit calls to initQgis, exitQgis from Python when running within the QGIS application -- this will crash!
-    mPythonUtils->runString(
+
+    if ( !mPythonUtils->isEnabled() )
+      return;
+    // Do not permit calls to initQgis/exitQgis from Python when running within the QGIS application.
+    // This is a defensive guard only, so keep it silent during startup even if the script cannot be applied.
+    (void)mPythonUtils->runStringUnsafe(
       QStringLiteral(
         "from qgis.core import QgsApplication as _QgsApplication\n"
         "\n"
@@ -12714,7 +12723,6 @@ void QgisApp::loadPythonSupport()
         "\n"
         "_QgsApplication.exitQgis = _qgis_app_exit_qgis\n"
       ),
-      QString(),
       false
     );
   }

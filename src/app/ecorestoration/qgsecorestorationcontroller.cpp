@@ -1505,7 +1505,7 @@ namespace
 
   QString integratedSam2ModelDirectory()
   {
-    return QDir( QCoreApplication::applicationDirPath() ).filePath( QStringLiteral( "models/sam2-onnx/sam2.1-hiera-tiny" ) );
+    return QDir( QCoreApplication::applicationDirPath() ).filePath( QStringLiteral( "models/sam2-onnx/sam2.1-hiera-large" ) );
   }
 
   bool hasIntegratedSam2Models()
@@ -2488,7 +2488,7 @@ namespace
   const QString sPhaseIdProperty = QStringLiteral( "eco/phaseId" );
   const QString sPhaseNameProperty = QStringLiteral( "eco/phaseName" );
   const QString sTreeIconProperty = QStringLiteral( "eco/treeIcon" );
-  const QString sPhasePrefix = QStringLiteral( "期次 路 " );
+  const QString sPhasePrefix = QStringLiteral( "期次 " );
 
   QgsLayerTreeGroup *directChildGroup( QgsLayerTreeGroup *parent, const QString &name )
   {
@@ -3000,7 +3000,7 @@ QgsEcoRestorationController::QgsEcoRestorationController( QgisApp *app )
   installEcoDockTitleBar( mDock );
   mDock->setWidget( createDockContents() );
   app->addDockWidget( Qt::RightDockWidgetArea, mDock );
-  mDock->show();
+  mDock->hide();
 
   mRecognitionDock = new QgsDockWidget( tr( "智能识别" ), app );
   mRecognitionDock->setObjectName( QStringLiteral( "EcoRecognitionDock" ) );
@@ -3215,20 +3215,17 @@ QgsEcoRestorationController::QgsEcoRestorationController( QgisApp *app )
     QTimer::singleShot( 0, this, [this] {
       setCompactMode( true );
       if ( mDock )
-      {
-        mDock->show();
-        mDock->raise();
-      }
+        mDock->hide();
+      if ( mPhotoDock )
+        mPhotoDock->hide();
     } );
     // QGIS can restore its saved dock layout after initializationCompleted.
-    // Re-assert the workbench panel once that restoration has settled so the
-    // business panel is open on a fresh application start.
+    // Keep the business panel closed on a fresh application start.
     QTimer::singleShot( 350, this, [this] {
       if ( mDock )
-      {
-        mDock->show();
-        mDock->raise();
-      }
+        mDock->hide();
+      if ( mPhotoDock )
+        mPhotoDock->hide();
     } );
   } );
 
@@ -3236,27 +3233,24 @@ QgsEcoRestorationController::QgsEcoRestorationController( QgisApp *app )
     scheduleProjectStateRefresh();
     setCompactMode( true );
     if ( mDock )
-    {
-      mDock->show();
-      mDock->raise();
-    }
+      mDock->hide();
+    if ( mPhotoDock )
+      mPhotoDock->hide();
   } );
 }
 
 void QgsEcoRestorationController::activateBusinessStartupLayout()
 {
-  // QGIS restores its dock layout near the end of initialization. Reassert
-  // the full business workbench after that restore has completed.
+  // Prepare the business workbench chrome without auto-opening the panel.
   setCompactMode( true );
   hideNativeQgisWidgets();
   refreshProjectState();
   if ( mToolbar )
     mToolbar->show();
   if ( mDock )
-  {
-    mDock->show();
-    mDock->raise();
-  }
+    mDock->hide();
+  if ( mPhotoDock )
+    mPhotoDock->hide();
   if ( QDockWidget *layers = mApp ? mApp->findChild<QDockWidget *>( QStringLiteral( "Layers" ) ) : nullptr )
     layers->show();
 }
@@ -3886,7 +3880,7 @@ void QgsEcoRestorationController::createBusinessProject()
   provinceEdit->setPlaceholderText( tr( "省份或区域" ) );
   QLineEdit *ownerEdit = new QLineEdit( &dialog );
   ownerEdit->setPlaceholderText( tr( "建设单位" ) );
-  QLineEdit *phaseEdit = new QLineEdit( tr( "绗?期" ), &dialog );
+  QLineEdit *phaseEdit = new QLineEdit( tr( "第1期" ), &dialog );
   formLayout->addRow( tr( "工程名称" ), nameEdit );
   formLayout->addRow( tr( "线路名称" ), lineEdit );
   formLayout->addRow( tr( "电压等级" ), voltageEdit );
@@ -4915,12 +4909,8 @@ void QgsEcoRestorationController::runTowerRecognition()
 {
   ecoImportTrace( QStringLiteral( "runTowerRecognition entered" ) );
 
-  QgsRasterLayer *rasterLayer = mRecognitionRasterCombo
-                                  ? qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( mRecognitionRasterCombo->currentData().toString() ) )
-                                  : nullptr;
-  QgsVectorLayer *towerLayer = mRecognitionTowerCombo
-                                 ? qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mRecognitionTowerCombo->currentData().toString() ) )
-                                 : nullptr;
+  QgsRasterLayer *rasterLayer = selectedRecognitionRasterLayer();
+  QgsVectorLayer *towerLayer = selectedRecognitionTowerLayer();
   ecoImportTrace( QStringLiteral( "runTowerRecognition selected raster=%1 tower=%2" )
                     .arg( rasterLayer ? rasterLayer->id() : QStringLiteral( "<null>" ),
                           towerLayer ? towerLayer->id() : QStringLiteral( "<null>" ) ) );
@@ -5028,14 +5018,14 @@ void QgsEcoRestorationController::updateRecognitionPreview()
     clearRecognitionPreview();
     return;
   }
-  if ( !mRecognitionPreviewActive || !mApp || !mRecognitionTowerCombo || !mRecognitionRasterCombo || !mRecognitionPreviewSwitch || !mRecognitionPreviewSwitch->isChecked() )
+  if ( !mRecognitionPreviewActive || !mApp || !mRecognitionPreviewSwitch || !mRecognitionPreviewSwitch->isChecked() )
   {
     clearRecognitionPreview();
     return;
   }
 
-  QgsRasterLayer *rasterLayer = qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( mRecognitionRasterCombo->currentData().toString() ) );
-  QgsVectorLayer *towerLayer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mRecognitionTowerCombo->currentData().toString() ) );
+  QgsRasterLayer *rasterLayer = selectedRecognitionRasterLayer();
+  QgsVectorLayer *towerLayer = selectedRecognitionTowerLayer();
   if ( !rasterLayer || !towerLayer || towerLayer->geometryType() != Qgis::GeometryType::Point )
   {
     clearRecognitionPreview();
@@ -5060,7 +5050,7 @@ void QgsEcoRestorationController::updateRecognitionPreview()
   }
   mRecognitionPreview->reset( Qgis::GeometryType::Polygon );
   for ( const QgsRectangle &extent : extents )
-  mRecognitionPreview->addGeometry( QgsGeometry::fromRect( extent ), rasterLayer->crs(), false );
+    mRecognitionPreview->addGeometry( QgsGeometry::fromRect( extent ), rasterLayer->crs(), false );
   mRecognitionPreview->updatePosition();
   mRecognitionPreview->show();
 }
@@ -7703,14 +7693,37 @@ QString QgsEcoRestorationController::currentPhaseName( const QString &phaseId ) 
   if ( id.isEmpty() )
     return tr( "未指定期次" );
 
+  const auto invalidName = [&id]( const QString &value ) {
+    const QString trimmed = value.trimmed();
+    return trimmed.isEmpty()
+           || trimmed == id
+           || trimmed.startsWith( QStringLiteral( "phase_" ) )
+           || trimmed.contains( QChar( 0xFFFD ) )
+           || trimmed.contains( QLatin1Char( '?' ) );
+  };
+
   QString name = QgsProject::instance()->readEntry( sProjectGroup, QStringLiteral( "phase/%1/name" ).arg( id ) ).trimmed();
+  if ( invalidName( name ) )
+    name.clear();
+
   if ( name.isEmpty() )
   {
     QgsLayerTreeGroup *group = nullptr;
     if ( QgsLayerTreeGroup *projectGroup = projectTreeRoot() )
       group = directChildGroupByProperty( projectGroup, sPhaseIdProperty, id );
     if ( group )
+    {
       name = group->customProperty( sPhaseNameProperty ).toString().trimmed();
+      if ( invalidName( name ) )
+        name.clear();
+    }
+  }
+
+  if ( name.isEmpty() )
+  {
+    const int index = phaseIds().indexOf( id );
+    if ( index >= 0 )
+      name = tr( "第%1期" ).arg( index + 1 );
   }
   return name.isEmpty() ? id : name;
 }
@@ -7856,12 +7869,12 @@ QgsLayerTreeGroup *QgsEcoRestorationController::phaseGroup( const QString &phase
       results->setExpanded( true );
       if ( !directChildGroup( results, sRecognitionGroup ) )
         results->addGroup( sRecognitionGroup );
-      
+
       if ( !directChildGroup( results, sSmartSegmentationGroup ) )
         results->addGroup( sSmartSegmentationGroup );
       if ( QgsLayerTreeGroup *recognition = directChildGroup( results, sRecognitionGroup ) )
         recognition->setCustomProperty( sTreeIconProperty, QStringLiteral( "disturbance" ) );
-      
+
       if ( QgsLayerTreeGroup *segmentation = directChildGroup( results, sSmartSegmentationGroup ) )
         segmentation->setCustomProperty( sTreeIconProperty, QStringLiteral( "segmentation" ) );
       if ( !mLayerImportInProgress )
@@ -8015,7 +8028,7 @@ void QgsEcoRestorationController::createPhase()
   hint->setProperty( "muted", true );
   layout->addWidget( hint );
   QFormLayout *form = new QFormLayout;
-  QLineEdit *nameEdit = new QLineEdit( tr( "绗?1期" ).arg( phaseIds().size() + 1 ), &dialog );
+  QLineEdit *nameEdit = new QLineEdit( tr( "第%1期" ).arg( phaseIds().size() + 1 ), &dialog );
   form->addRow( tr( "期次名称" ), nameEdit );
   layout->addLayout( form );
   QDialogButtonBox *buttons = new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog );
@@ -9616,42 +9629,53 @@ void QgsEcoRestorationController::refreshLayerChoices()
 {
   if ( mProjectTransitionInProgress )
     return;
-  if ( !mResultLayerCombo || !mTowerLayerCombo )
-    return;
+
   refreshPhaseChoices();
-  const QString currentResult = mResultLayerCombo->currentData().toString();
-  const QString currentTower = mTowerLayerCombo->currentData().toString();
+
+  const QString currentResult = mResultLayerCombo ? mResultLayerCombo->currentData().toString() : QString();
+  const QString currentTower = mTowerLayerCombo ? mTowerLayerCombo->currentData().toString() : QString();
   const QString currentRecognitionTower = mRecognitionTowerCombo ? mRecognitionTowerCombo->currentData().toString() : QString();
   const QString currentRecognitionRaster = mRecognitionRasterCombo ? mRecognitionRasterCombo->currentData().toString() : QString();
   const QString phaseId = currentPhaseId();
+
+  std::unique_ptr<QSignalBlocker> resultBlocker;
+  std::unique_ptr<QSignalBlocker> towerBlocker;
+  std::unique_ptr<QSignalBlocker> recognitionTowerBlocker;
   std::unique_ptr<QSignalBlocker> recognitionRasterBlocker;
-  if ( mRecognitionRasterCombo )
-    recognitionRasterBlocker = std::make_unique<QSignalBlocker>( mRecognitionRasterCombo );
-  mResultLayerCombo->clear();
-  mTowerLayerCombo->clear();
-  if ( mRecognitionTowerCombo )
-    mRecognitionTowerCombo->clear();
-  if ( mRecognitionRasterCombo )
-    mRecognitionRasterCombo->clear();
+  if ( mResultLayerCombo ) resultBlocker = std::make_unique<QSignalBlocker>( mResultLayerCombo );
+  if ( mTowerLayerCombo ) towerBlocker = std::make_unique<QSignalBlocker>( mTowerLayerCombo );
+  if ( mRecognitionTowerCombo ) recognitionTowerBlocker = std::make_unique<QSignalBlocker>( mRecognitionTowerCombo );
+  if ( mRecognitionRasterCombo ) recognitionRasterBlocker = std::make_unique<QSignalBlocker>( mRecognitionRasterCombo );
+
+  if ( mResultLayerCombo ) mResultLayerCombo->clear();
+  if ( mTowerLayerCombo ) mTowerLayerCombo->clear();
+  if ( mRecognitionTowerCombo ) mRecognitionTowerCombo->clear();
+  if ( mRecognitionRasterCombo ) mRecognitionRasterCombo->clear();
 
   int rasterCount = 0;
   int pointCount = 0;
   int lineCount = 0;
   int polygonCount = 0;
   QString preferredRecognitionRaster;
+  QString preferredRecognitionTower;
+
   const auto layers = QgsProject::instance()->mapLayers();
   for ( QgsMapLayer *layer : layers )
   {
+    if ( !layer )
+      continue;
+
     const QString layerPhaseId = layerPhaseIdForLayer( layer );
     const bool currentPhaseLayer = layerPhaseId.isEmpty() || phaseId.isEmpty() || layerPhaseId == phaseId;
+    const QString displayName = layerPhaseId.isEmpty()
+                                  ? layer->name()
+                                  : tr( "期次 %1 / %2" ).arg( currentPhaseName( layerPhaseId ), layer->name() );
+
     if ( qobject_cast<QgsRasterLayer *>( layer ) )
     {
       ++rasterCount;
       if ( mRecognitionRasterCombo )
       {
-        QString displayName = layer->name();
-        if ( !layerPhaseId.isEmpty() )
-          displayName = tr( "%1 路 %2" ).arg( currentPhaseName( layerPhaseId ), layer->name() );
         mRecognitionRasterCombo->addItem( displayName, layer->id() );
         const int itemIndex = mRecognitionRasterCombo->count() - 1;
         mRecognitionRasterCombo->setItemData( itemIndex, layer->name(), Qt::ToolTipRole );
@@ -9660,53 +9684,57 @@ void QgsEcoRestorationController::refreshLayerChoices()
       }
       continue;
     }
+
     QgsVectorLayer *vectorLayer = qobject_cast<QgsVectorLayer *>( layer );
     if ( !vectorLayer )
       continue;
+
     switch ( vectorLayer->geometryType() )
     {
       case Qgis::GeometryType::Point:
         ++pointCount;
-        mTowerLayerCombo->addItem( vectorLayer->name(), vectorLayer->id() );
-        if ( mRecognitionTowerCombo )
-          mRecognitionTowerCombo->addItem( vectorLayer->name(), vectorLayer->id() );
+        if ( mTowerLayerCombo ) mTowerLayerCombo->addItem( displayName, vectorLayer->id() );
+        if ( mRecognitionTowerCombo ) mRecognitionTowerCombo->addItem( displayName, vectorLayer->id() );
+        if ( preferredRecognitionTower.isEmpty() || ( currentPhaseLayer && layerPhaseId == phaseId ) )
+          preferredRecognitionTower = vectorLayer->id();
         break;
       case Qgis::GeometryType::Line:
         ++lineCount;
         break;
       case Qgis::GeometryType::Polygon:
         ++polygonCount;
-        if ( currentPhaseLayer )
+        if ( currentPhaseLayer && mResultLayerCombo )
           mResultLayerCombo->addItem( vectorLayer->name(), vectorLayer->id() );
         break;
       default:
         break;
     }
   }
+
   if ( mDataSummaryLabel )
-    mDataSummaryLabel->setText( tr( "影像 %1 涓?路 杆塔?%2 涓?路 线路 %3 涓?路 面图?%4 个" ).arg( rasterCount ).arg( pointCount ).arg( lineCount ).arg( polygonCount ) );
-  int index = mResultLayerCombo->findData( currentResult );
-  if ( index >= 0 )
-    mResultLayerCombo->setCurrentIndex( index );
-  index = mTowerLayerCombo->findData( currentTower );
-  if ( index >= 0 )
-    mTowerLayerCombo->setCurrentIndex( index );
-  if ( mRecognitionTowerCombo )
-  {
-    index = mRecognitionTowerCombo->findData( currentRecognitionTower );
-    if ( index >= 0 )
-      mRecognitionTowerCombo->setCurrentIndex( index );
-  }
-  if ( mRecognitionRasterCombo )
-  {
-    index = mRecognitionRasterCombo->findData( currentRecognitionRaster );
-    if ( index < 0 && !preferredRecognitionRaster.isEmpty() )
-      index = mRecognitionRasterCombo->findData( preferredRecognitionRaster );
-    if ( index >= 0 )
-      mRecognitionRasterCombo->setCurrentIndex( index );
-  }
+    mDataSummaryLabel->setText( tr( "影像 %1 张 / 杆塔 %2 个 / 线路 %3 条 / 面图 %4 个" ).arg( rasterCount ).arg( pointCount ).arg( lineCount ).arg( polygonCount ) );
+
+  const auto restoreSelection = []( QComboBox *combo, const QString &previousId, const QString &preferredId ) {
+    if ( !combo )
+      return;
+    int index = combo->findData( previousId );
+    if ( index < 0 && !preferredId.isEmpty() )
+      index = combo->findData( preferredId );
+    if ( index < 0 && combo->count() > 0 )
+      index = 0;
+    combo->setCurrentIndex( index );
+  };
+
+  restoreSelection( mResultLayerCombo, currentResult, QString() );
+  restoreSelection( mTowerLayerCombo, currentTower, preferredRecognitionTower );
+  restoreSelection( mRecognitionTowerCombo, currentRecognitionTower, preferredRecognitionTower );
+  restoreSelection( mRecognitionRasterCombo, currentRecognitionRaster, preferredRecognitionRaster );
+
   if ( mRecognitionPreviewActive )
+  {
+    refreshRecognitionRasterOrder();
     updateRecognitionPreview();
+  }
 }
 
 void QgsEcoRestorationController::refreshRecognitionRasterOrder()
@@ -10756,9 +10784,16 @@ void QgsEcoRestorationController::showRecognitionPanel()
     const QSignalBlocker blocker( mRecognitionPanelAction );
     mRecognitionPanelAction->setChecked( true );
   }
+
+  refreshLayerChoices();
   mRecognitionDock->show();
   mRecognitionDock->raise();
-  updateRecognitionPreview();
+  QTimer::singleShot( 0, this, [this] {
+    if ( !mRecognitionDock || !mRecognitionDock->isVisible() )
+      return;
+    refreshLayerChoices();
+    updateRecognitionPreview();
+  } );
 }
 
 void QgsEcoRestorationController::toggleTowerDisplayMode( QgsVectorLayer *layer )
@@ -10776,11 +10811,11 @@ void QgsEcoRestorationController::toggleTowerDisplayMode( QgsVectorLayer *layer 
 
 QgsRasterLayer *QgsEcoRestorationController::selectedRecognitionRasterLayer() const
 {
-  QgsRasterLayer *rasterLayer = mRecognitionRasterCombo
-                                  ? qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( mRecognitionRasterCombo->currentData().toString() ) )
-                                  : nullptr;
-  if ( rasterLayer )
-    return rasterLayer;
+  if ( mRecognitionRasterCombo )
+  {
+    if ( QgsRasterLayer *rasterLayer = qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( mRecognitionRasterCombo->currentData().toString() ) ) )
+      return rasterLayer;
+  }
 
   const QString phaseId = currentPhaseId();
   const auto layers = QgsProject::instance()->mapLayers();
@@ -10788,7 +10823,7 @@ QgsRasterLayer *QgsEcoRestorationController::selectedRecognitionRasterLayer() co
   {
     if ( QgsRasterLayer *candidate = qobject_cast<QgsRasterLayer *>( layer ) )
     {
-      const QString layerPhaseId = candidate->customProperty( sPhaseIdProperty ).toString();
+      const QString layerPhaseId = layerPhaseIdForLayer( candidate );
       if ( phaseId.isEmpty() || layerPhaseId.isEmpty() || layerPhaseId == phaseId )
         return candidate;
     }
@@ -10840,6 +10875,40 @@ QString QgsEcoRestorationController::askSmartSegmentationLayerName() const
   if ( name.isEmpty() )
     name = tr( "智能分割成果_%1" ).arg( QDateTime::currentDateTime().toString( QStringLiteral( "yyyyMMdd_HHmmss" ) ) );
   return sanitizedName( name );
+}
+
+QgsVectorLayer *QgsEcoRestorationController::selectedRecognitionTowerLayer() const
+{
+  if ( mRecognitionTowerCombo )
+  {
+    if ( QgsVectorLayer *towerLayer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mRecognitionTowerCombo->currentData().toString() ) ) )
+    {
+      if ( towerLayer->geometryType() == Qgis::GeometryType::Point )
+        return towerLayer;
+    }
+  }
+
+  const QString phaseId = currentPhaseId();
+  const auto layers = QgsProject::instance()->mapLayers();
+  for ( QgsMapLayer *layer : layers )
+  {
+    if ( QgsVectorLayer *candidate = qobject_cast<QgsVectorLayer *>( layer ) )
+    {
+      const QString layerPhaseId = layerPhaseIdForLayer( candidate );
+      if ( candidate->geometryType() == Qgis::GeometryType::Point
+           && ( phaseId.isEmpty() || layerPhaseId.isEmpty() || layerPhaseId == phaseId ) )
+        return candidate;
+    }
+  }
+  for ( QgsMapLayer *layer : layers )
+  {
+    if ( QgsVectorLayer *candidate = qobject_cast<QgsVectorLayer *>( layer ) )
+    {
+      if ( candidate->geometryType() == Qgis::GeometryType::Point )
+        return candidate;
+    }
+  }
+  return nullptr;
 }
 
 QgsVectorLayer *QgsEcoRestorationController::selectedTowerLayer() const

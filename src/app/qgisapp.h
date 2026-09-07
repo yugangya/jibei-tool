@@ -1540,6 +1540,12 @@ class APP_EXPORT QgisApp : public QMainWindow, private Ui::MainWindow
     bool createBlankProjectForIntegratedWorkflow();
 
     /**
+     * Saves the current project for an integrated application workflow using
+     * the standard QGIS save path.
+     */
+    bool saveProjectForIntegratedWorkflow();
+
+    /**
      * Check to see if the current project file is dirty and if so, prompt the user to save it.
      * \returns TRUE if saved or discarded, FALSE if canceled
      */

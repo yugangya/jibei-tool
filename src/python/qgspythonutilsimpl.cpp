@@ -113,7 +113,7 @@ _ssr = StartupScriptRunner()
     globals(),
 )
 )"""" )
-      .arg( pythonPath() ),
+      .arg( QString( pythonPath() ).replace( '\\', '/' ) ),
     QObject::tr( "Couldn't create run_startup_script." ),
     true
   );
@@ -225,6 +225,47 @@ void QgsPythonUtilsImpl::init()
   PyConfig config;
   PyConfig_InitPythonConfig( &config );
 
+#if defined( Q_OS_WIN ) && defined( PY_MAJOR_VERSION ) && defined( PY_MINOR_VERSION ) && ( ( PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 8 ) || PY_MAJOR_VERSION > 3 )
+  // Python 3.12's embedded configuration is not guaranteed to consume
+  // PYTHONHOME from the process environment. The portable Windows launcher
+  // sets it to the bundled OSGeo4W Python runtime, so pass it explicitly
+  // to PyConfig before interpreter initialization.
+  const QString pythonHome = qEnvironmentVariable( "PYTHONHOME" );
+  if ( !pythonHome.isEmpty() )
+  {
+    status = PyConfig_SetString( &config, &config.home, pythonHome.toStdWString().c_str() );
+    if ( PyStatus_Exception( status ) )
+    {
+      qWarning() << "Failed to set python home";
+    }
+  }
+#endif
+#if defined( Q_OS_WIN ) && defined( PY_MAJOR_VERSION ) && defined( PY_MINOR_VERSION ) && ( ( PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 8 ) || PY_MAJOR_VERSION > 3 )
+  // For the portable Windows build, configure Python's module search paths
+  // explicitly. Python 3.12 embedded initialization may otherwise ignore
+  // PYTHONPATH and fail before QGIS has appended its own binding directory.
+  if ( !pythonHome.isEmpty() )
+  {
+    const QStringList pythonSearchPaths = {
+      pythonHome + "\\python312.zip",
+      pythonHome,
+      pythonHome + "\\DLLs",
+      pythonHome + "\\Lib",
+      pythonHome + "\\Lib\\site-packages"
+    };
+    config.module_search_paths_set = 1;
+    for ( const QString &path : pythonSearchPaths )
+    {
+      status = PyWideStringList_Append( &config.module_search_paths, path.toStdWString().c_str() );
+      if ( PyStatus_Exception( status ) )
+      {
+        qWarning() << "Failed to append python search path" << path;
+      }
+    }
+  }
+#endif
+
+
 #ifdef QGIS_MAC_BUNDLE
   // If we package QGIS as a mac app, we deploy Qt plugins into [app]/Contents/PlugIns
   if ( qgetenv( "PYTHONHOME" ).isNull() )
@@ -293,9 +334,11 @@ void QgsPythonUtilsImpl::doCustomImports()
 
 void QgsPythonUtilsImpl::initPython( QgisInterface *interface, const bool installErrorHook, const QString &faultHandlerLogPath )
 {
+  mSuppressStartupErrorDialogs = true;
   init();
   if ( !checkSystemImports() )
   {
+    mSuppressStartupErrorDialogs = false;
     exitPython();
     return;
   }
@@ -320,6 +363,7 @@ void QgsPythonUtilsImpl::initPython( QgisInterface *interface, const bool instal
 
   if ( !checkQgisUser() )
   {
+    mSuppressStartupErrorDialogs = false;
     exitPython();
     return;
   }
@@ -327,6 +371,7 @@ void QgsPythonUtilsImpl::initPython( QgisInterface *interface, const bool instal
   if ( installErrorHook )
     QgsPythonUtilsImpl::installErrorHook();
   finish();
+  mSuppressStartupErrorDialogs = false;
 }
 
 
@@ -424,7 +469,7 @@ QString QgsPythonUtilsImpl::runStringUnsafe( const QString &command, bool single
   gstate = PyGILState_Ensure();
   QString ret;
 
-  // TODO: convert special characters from unicode strings u"…" to \uXXXX
+  // TODO: convert special characters from unicode strings u"闂? to \uXXXX
   // so that they're not mangled to utf-8
   // (non-unicode strings can be mangled)
   PyObject *obj = PyRun_String( command.toUtf8().constData(), single ? Py_single_input : Py_file_input, mMainDict, mMainDict );
@@ -449,6 +494,13 @@ bool QgsPythonUtilsImpl::runString( const QString &command, QString msgOnError, 
     return true;
   else
     res = false;
+
+  // Startup failures are logged but must not interrupt application startup with a modal dialog.
+  if ( mSuppressStartupErrorDialogs )
+  {
+    qWarning() << "Python startup command failed:" << command << traceback;
+    return false;
+  }
 
   if ( msgOnError.isEmpty() )
   {
