@@ -1,0 +1,13 @@
+[general]
+name=DB Manager (deprecated)
+description=This plugin is deprecated, please install the "DB Manager (community)" plugin instead.
+category=Database
+version=0.1.20
+qgisMinimumVersion=4.0
+
+author=deprecated
+email=deprecated@deprecated
+
+icon=icons/dbmanager.svg
+
+class_name=DBManagerPlugin

@@ -1,0 +1,188 @@
+/***************************************************************************
+                              qgsLandingPagehandlers.cpp
+                              -------------------------
+  begin                : May 3, 2019
+  copyright            : (C) 2019 by Alessandro Pasotti
+  email                : elpaso at itopen dot it
+ ***************************************************************************/
+
+/***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#include "qgslandingpagehandlers.h"
+
+#include "qgslandingpageutils.h"
+#include "qgslayertree.h"
+#include "qgslayertreenode.h"
+#include "qgsserverinterface.h"
+#include "qgsserverprojectutils.h"
+#include "qgsserverresponse.h"
+#include "qgsvectorlayer.h"
+
+#include <QCryptographicHash>
+#include <QDir>
+#include <QString>
+
+using namespace Qt::StringLiterals;
+
+QgsLandingPageHandler::QgsLandingPageHandler( const QgsServerSettings *settings )
+  : mSettings( settings )
+{
+  setContentTypes( { QgsServerOgcApi::ContentType::JSON, QgsServerOgcApi::ContentType::HTML } );
+}
+
+void QgsLandingPageHandler::handleRequest( const QgsServerApiContext &context ) const
+{
+  const QString requestPrefix { prefix( context.serverInterface()->serverSettings() ) };
+  auto urlPath { context.request()->url().path() };
+
+  while ( urlPath.endsWith( '/' ) )
+  {
+    urlPath.chop( 1 );
+  }
+
+  if ( urlPath == requestPrefix )
+  {
+    QUrl url { context.request()->url() };
+    url.setPath( u"%1/index.%2"_s.arg( requestPrefix, QgsServerOgcApi::contentTypeToExtension( contentTypeFromRequest( context.request() ) ) ) );
+    context.response()->setStatusCode( 302 );
+    context.response()->setHeader( u"Location"_s, url.toString() );
+  }
+  else
+  {
+    const json projects = projectsData( *context.request(), context.serverInterface() );
+    json data {
+      { "links", links( context ) },
+      { "projects", projects },
+      { "projects_count", projects.size() },
+      // Add env variable to allow creation of OAPIF URL
+      { "QGIS_SERVER_API_WFS3_ROOT_PATH", context.serverInterface()->serverSettings()->apiWfs3RootPath().toStdString() }
+    };
+    write( data, context, { { "pageTitle", linkTitle() }, { "navigation", json::array() } } );
+  }
+}
+
+const QString QgsLandingPageHandler::templatePath( const QgsServerApiContext &context ) const
+{
+  QString path { context.serverInterface()->serverSettings()->apiResourcesDirectory() };
+  path += "/ogc/static/landingpage/index.html"_L1;
+  return path;
+}
+
+QString QgsLandingPageHandler::prefix( const QgsServerSettings *settings )
+{
+  QString prefix { settings->landingPageBaseUrlPrefix() };
+
+  while ( prefix.endsWith( '/' ) )
+  {
+    prefix.chop( 1 );
+  }
+
+  if ( !prefix.isEmpty() && !prefix.startsWith( '/' ) )
+  {
+    prefix.prepend( '/' );
+  }
+  return prefix;
+}
+
+json QgsLandingPageHandler::projectsData( const QgsServerRequest &request, QgsServerInterface *serverInterface ) const
+{
+  json j = json::array();
+  const QString originalConfigFilePath { serverInterface ? serverInterface->configFilePath() : QString() };
+  const QMap<QString, QString> availableProjects = QgsLandingPageUtils::projects( *mSettings );
+  for ( auto it = availableProjects.constBegin(); it != availableProjects.constEnd(); ++it )
+  {
+    if ( serverInterface )
+    {
+      serverInterface->setConfigFilePath( it.value() );
+    }
+    try
+    {
+      j.push_back( QgsLandingPageUtils::projectInfo( it.value(), mSettings, request, serverInterface ) );
+    }
+    catch ( QgsServerException & )
+    {
+      QgsMessageLog::logMessage( u"Could not open project '%1': skipping."_s.arg( it.value() ), u"Landing Page"_s, Qgis::MessageLevel::Critical );
+    }
+    catch ( ... )
+    {
+      if ( serverInterface )
+      {
+        serverInterface->setConfigFilePath( originalConfigFilePath );
+      }
+      throw;
+    }
+    if ( serverInterface )
+    {
+      serverInterface->setConfigFilePath( originalConfigFilePath );
+    }
+  }
+  return j;
+}
+
+
+QgsLandingPageMapHandler::QgsLandingPageMapHandler( const QgsServerSettings *settings )
+  : mSettings( settings )
+{
+  setContentTypes( { QgsServerOgcApi::ContentType::JSON } );
+}
+
+void QgsLandingPageMapHandler::handleRequest( const QgsServerApiContext &context ) const
+{
+  json data;
+  data["links"] = json::array();
+  const QString projectPath { QgsLandingPageUtils::projectUriFromUrl( context.request()->url().path(), *mSettings ) };
+  if ( projectPath.isEmpty() )
+  {
+    throw QgsServerApiNotFoundError( u"Requested project hash not found!"_s );
+  }
+  const QString originalConfigFilePath { context.serverInterface() ? context.serverInterface()->configFilePath() : QString() };
+  if ( context.serverInterface() )
+  {
+    context.serverInterface()->setConfigFilePath( projectPath );
+  }
+  try
+  {
+    data["project"] = QgsLandingPageUtils::projectInfo( projectPath, mSettings, *context.request(), context.serverInterface() );
+  }
+  catch ( ... )
+  {
+    if ( context.serverInterface() )
+    {
+      context.serverInterface()->setConfigFilePath( originalConfigFilePath );
+    }
+    throw;
+  }
+  if ( context.serverInterface() )
+  {
+    context.serverInterface()->setConfigFilePath( originalConfigFilePath );
+  }
+  write( data, context, { { "pageTitle", linkTitle() }, { "navigation", json::array() } } );
+}
+
+QRegularExpression QgsLandingPageMapHandler::path() const
+{
+  return QRegularExpression( QStringLiteral( R"re(^%1/map/([a-f0-9]{32}).*$)re" ).arg( QgsLandingPageHandler::prefix( mSettings ) ) );
+}
+
+const QString QgsLandingPageMapHandler::templatePath( const QgsServerApiContext &context ) const
+{
+  // resources/server/api + /ogc/templates/wfs3/ + operationId() + .html
+  QString path { context.serverInterface()->serverSettings()->apiResourcesDirectory() };
+  path += "/ogc/templates/wfs3/"_L1;
+  path += QString::fromStdString( operationId() );
+  path += ".html"_L1;
+  return path;
+}
+
+
+QRegularExpression QgsLandingPageHandler::path() const
+{
+  return QRegularExpression( QStringLiteral( R"re(^%1(/index.html|/index.json|/)?$)re" ).arg( prefix( mSettings ) ) );
+}

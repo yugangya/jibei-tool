@@ -1,0 +1,763 @@
+/***************************************************************************
+     testqgsmarkerlinesymbol.cpp
+     --------------------------------------
+    Date                 : Nov 12  2015
+    Copyright            : (C) 2015 by Sandro Santilli
+    Email                : strk@keybit.net
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+#include "qgstest.h"
+
+#include <QApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QObject>
+#include <QString>
+#include <QStringList>
+
+using namespace Qt::StringLiterals;
+
+//qgis includes...
+#include "qgsrasterlayer.h"
+#include "qgsvectorlayer.h"
+#include "qgsproject.h"
+#include "qgsapplication.h"
+#include "qgspallabeling.h"
+#include "qgsfontutils.h"
+#include "qgslinesymbol.h"
+#include "qgslinesymbollayer.h"
+#include "qgsmarkersymbol.h"
+#include "qgsmarkersymbollayer.h"
+#include "qgsproperty.h"
+#include "qgssinglesymbolrenderer.h"
+#include "qgssymbollayerutils.h"
+//qgis unit test includes
+#include <qgsrenderchecker.h>
+
+/**
+ * \ingroup UnitTests
+ * This is a unit test for the Marker Line symbol
+ */
+class TestQgsMarkerLineSymbol : public QgsTest
+{
+    Q_OBJECT
+  public:
+    TestQgsMarkerLineSymbol()
+      : QgsTest( u"Line Marker Symbol Tests"_s )
+    {
+      mTestDataDir = QStringLiteral( TEST_DATA_DIR ) + '/';
+    }
+
+    ~TestQgsMarkerLineSymbol() override;
+
+  private slots:
+    void initTestCase();    // will be called before the first testfunction is executed.
+    void cleanupTestCase(); // will be called after the last testfunction was executed.
+
+    void lineOffset();
+    void pointNumInterval();
+    void pointNumVertex();
+    void collectPoints_data();
+    void collectPoints();
+    void parseBlankSegments_data();
+    void parseBlankSegments();
+    void parseBlankSegmentsMapUnits();
+    void parseExtraItems_data();
+    void parseExtraItems();
+
+  private:
+    bool render( const QString &fileName );
+
+    QString mTestDataDir;
+    QgsVectorLayer *mLinesLayer = nullptr;
+    QgsMapSettings *mMapSettings = nullptr;
+};
+
+//runs before all tests
+void TestQgsMarkerLineSymbol::initTestCase()
+{
+  // init QGIS's paths - true means that all path will be inited from prefix
+  QgsApplication::init();
+  QgsApplication::initQgis();
+
+  mMapSettings = new QgsMapSettings();
+
+  QList<QgsMapLayer *> mapLayers;
+
+  //create a line layer that will be used in all tests...
+  const QString myLinesFileName = mTestDataDir + "lines_cardinals.shp";
+  const QFileInfo myLinesFileInfo( myLinesFileName );
+  mLinesLayer = new QgsVectorLayer( myLinesFileInfo.filePath(), myLinesFileInfo.completeBaseName(), u"ogr"_s );
+  mapLayers << mLinesLayer;
+
+  // Register all layers with the registry
+  QgsProject::instance()->addMapLayers( mapLayers );
+
+  // This is needed to correctly set rotation center,
+  // the actual size doesn't matter as QgsRenderChecker will
+  // re-set it to the size of the expected image
+  mMapSettings->setOutputSize( QSize( 256, 256 ) );
+
+  QgsFontUtils::loadStandardTestFonts( QStringList() << u"Bold"_s );
+}
+
+TestQgsMarkerLineSymbol::~TestQgsMarkerLineSymbol() = default;
+
+//runs after all tests
+void TestQgsMarkerLineSymbol::cleanupTestCase()
+{
+  delete mMapSettings;
+  QgsApplication::exitQgis();
+}
+
+void TestQgsMarkerLineSymbol::lineOffset()
+{
+  mMapSettings->setLayers( QList<QgsMapLayer *>() << mLinesLayer );
+
+  // Negative offset on marker line
+  // See https://github.com/qgis/QGIS/issues/21836
+
+  const QString qml = mTestDataDir + "marker_line_offset.qml";
+  bool success = false;
+  mLinesLayer->loadNamedStyle( qml, success );
+
+  QVERIFY( success );
+  mMapSettings->setExtent( QgsRectangle( -140, -140, 140, 140 ) );
+  QVERIFY( render( u"line_offset"_s ) );
+
+  // TODO: -0.0 offset, see
+  // https://github.com/qgis/QGIS/issues/21836#issuecomment-495853073
+}
+
+void TestQgsMarkerLineSymbol::pointNumInterval()
+{
+  mMapSettings->setLayers( QList<QgsMapLayer *>() << mLinesLayer );
+
+  QgsMarkerLineSymbolLayer *ml = new QgsMarkerLineSymbolLayer();
+  ml->setPlacements( Qgis::MarkerLinePlacement::Interval );
+  ml->setInterval( 4 );
+  QgsLineSymbol *lineSymbol = new QgsLineSymbol();
+  lineSymbol->changeSymbolLayer( 0, ml );
+  QgsSingleSymbolRenderer *r = new QgsSingleSymbolRenderer( lineSymbol );
+
+  // make sub-symbol
+  QVariantMap props;
+  props[u"color"_s] = u"255,0,0"_s;
+  props[u"size"_s] = u"2"_s;
+  props[u"outline_style"_s] = u"no"_s;
+  QgsSimpleMarkerSymbolLayer *marker = static_cast<QgsSimpleMarkerSymbolLayer *>( QgsSimpleMarkerSymbolLayer::create( props ) );
+
+  marker->setDataDefinedProperty( QgsSymbolLayer::Property::Size, QgsProperty::fromExpression( u"@geometry_point_num * 2"_s ) );
+
+  QgsMarkerSymbol *subSymbol = new QgsMarkerSymbol();
+  subSymbol->changeSymbolLayer( 0, marker );
+  ml->setSubSymbol( subSymbol );
+
+  mLinesLayer->setRenderer( r );
+
+  mMapSettings->setExtent( QgsRectangle( -140, -140, 140, 140 ) );
+  QVERIFY( render( u"point_num_interval"_s ) );
+}
+
+void TestQgsMarkerLineSymbol::pointNumVertex()
+{
+  mMapSettings->setLayers( QList<QgsMapLayer *>() << mLinesLayer );
+
+  QgsMarkerLineSymbolLayer *ml = new QgsMarkerLineSymbolLayer();
+  ml->setPlacements( Qgis::MarkerLinePlacement::Vertex );
+  QgsLineSymbol *lineSymbol = new QgsLineSymbol();
+  lineSymbol->changeSymbolLayer( 0, ml );
+  QgsSingleSymbolRenderer *r = new QgsSingleSymbolRenderer( lineSymbol );
+
+  // make sub-symbol
+  QVariantMap props;
+  props[u"color"_s] = u"255,0,0"_s;
+  props[u"size"_s] = u"2"_s;
+  props[u"outline_style"_s] = u"no"_s;
+  QgsSimpleMarkerSymbolLayer *marker = static_cast<QgsSimpleMarkerSymbolLayer *>( QgsSimpleMarkerSymbolLayer::create( props ) );
+
+  marker->setDataDefinedProperty( QgsSymbolLayer::Property::Size, QgsProperty::fromExpression( u"@geometry_point_num * 2"_s ) );
+
+  QgsMarkerSymbol *subSymbol = new QgsMarkerSymbol();
+  subSymbol->changeSymbolLayer( 0, marker );
+  ml->setSubSymbol( subSymbol );
+
+  mLinesLayer->setRenderer( r );
+
+  mMapSettings->setExtent( QgsRectangle( -140, -140, 140, 140 ) );
+  QVERIFY( render( u"point_num_vertex"_s ) );
+}
+
+void TestQgsMarkerLineSymbol::collectPoints_data()
+{
+  QTest::addColumn<QVector<QPointF>>( "input" );
+  QTest::addColumn<double>( "interval" );
+  QTest::addColumn<double>( "initialOffset" );
+  QTest::addColumn<double>( "initialLag" );
+  QTest::addColumn<int>( "numberPointsRequired" );
+  QTest::addColumn<QVector<QPointF>>( "expected" );
+
+  QTest::newRow( "empty" ) << QVector<QPointF>() << 1.0 << 0.0 << 0.0 << 0 << QVector<QPointF>();
+
+  QTest::newRow( "a" ) << ( QVector<QPointF>() << QPointF( 1, 2 ) ) << 1.0 << 0.0 << 0.0 << 0 << ( QVector<QPointF>() );
+
+  QTest::newRow( "b" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 1.0
+    << 0.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 2, 2 )
+         << QPointF( 3, 2 )
+         << QPointF( 4, 2 )
+         << QPointF( 5, 2 )
+         << QPointF( 6, 2 )
+         << QPointF( 7, 2 )
+         << QPointF( 8, 2 )
+         << QPointF( 9, 2 )
+         << QPointF( 10, 2 )
+         << QPointF( 11, 2 ) );
+
+  QTest::newRow( "b maxpoints" ) << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) ) << 1.0 << 0.0 << 0.0 << 3 << ( QVector<QPointF>() << QPointF( 2, 2 ) << QPointF( 3, 2 ) << QPointF( 4, 2 ) );
+
+  QTest::newRow( "b pad points" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 1.0
+    << 0.0
+    << 0.0
+    << 13
+    << ( QVector<QPointF>()
+         << QPointF( 2, 2 )
+         << QPointF( 3, 2 )
+         << QPointF( 4, 2 )
+         << QPointF( 5, 2 )
+         << QPointF( 6, 2 )
+         << QPointF( 7, 2 )
+         << QPointF( 8, 2 )
+         << QPointF( 9, 2 )
+         << QPointF( 10, 2 )
+         << QPointF( 11, 2 )
+         << QPointF( 11, 2 )
+         << QPointF( 11, 2 )
+         << QPointF( 11, 2 ) );
+
+  QTest::newRow( "c" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 1.0
+    << 1.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 3, 2 )
+         << QPointF( 4, 2 )
+         << QPointF( 5, 2 )
+         << QPointF( 6, 2 )
+         << QPointF( 7, 2 )
+         << QPointF( 8, 2 )
+         << QPointF( 9, 2 )
+         << QPointF( 10, 2 )
+         << QPointF( 11, 2 ) );
+
+  QTest::newRow( "c3" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 2.0
+    << 0.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 3, 2 ) << QPointF( 5, 2 ) << QPointF( 7, 2 ) << QPointF( 9, 2 ) << QPointF( 11, 2 ) );
+
+  QTest::newRow( "d" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 2.0
+    << 1.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 2, 2 ) << QPointF( 4, 2 ) << QPointF( 6, 2 ) << QPointF( 8, 2 ) << QPointF( 10, 2 ) );
+
+  QTest::newRow( "e" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 2.0
+    << 2.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 3, 2 ) << QPointF( 5, 2 ) << QPointF( 7, 2 ) << QPointF( 9, 2 ) << QPointF( 11, 2 ) );
+
+  QTest::newRow( "f" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 2.0
+    << 0.0
+    << 1.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 2, 2 ) << QPointF( 4, 2 ) << QPointF( 6, 2 ) << QPointF( 8, 2 ) << QPointF( 10, 2 ) );
+
+  QTest::newRow( "g" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 2.0
+    << 0.0
+    << 2.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 1, 2 ) << QPointF( 3, 2 ) << QPointF( 5, 2 ) << QPointF( 7, 2 ) << QPointF( 9, 2 ) << QPointF( 11, 2 ) );
+
+  QTest::newRow( "h" )
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 11, 2 ) )
+    << 2.0
+    << 0.0
+    << 2.1
+    << 0
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 1, 2 ) << QPointF( 2.9, 2 ) << QPointF( 4.9, 2 ) << QPointF( 6.9, 2 ) << QPointF( 8.9, 2 ) << QPointF( 10.9, 2 ) );
+
+  QTest::newRow( "i" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 8, 2 ) )
+    << 2.0
+    << 2.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 4, 2 ) << QPointF( 6, 2 ) << QPointF( 8, 2 ) );
+
+  QTest::newRow( "j" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 8, 2 ) )
+    << 2.0
+    << 0.0
+    << 2.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 4, 2 ) << QPointF( 6, 2 ) << QPointF( 8, 2 ) );
+
+  QTest::newRow( "k" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 8, 2 ) )
+    << 2.0
+    << 0.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 2, 2 ) << QPointF( 4, 2 ) << QPointF( 6, 2 ) << QPointF( 8, 2 ) );
+
+  QTest::newRow( "closed ring" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 2.0
+    << 2.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) );
+
+  QTest::newRow( "closed ring required points" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 2.0
+    << 2.0
+    << 0.0
+    << 7
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) );
+  QTest::newRow( "closed ring 1.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 1.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 1, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 1 ) << QPointF( 2, 0 ) << QPointF( 1, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 1 ) << QPointF( 0, 2 ) );
+  QTest::newRow( "closed ring 1.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 1.0
+    << 0.0
+    << 11
+    << ( QVector<QPointF>()
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 ) );
+  QTest::newRow( "closed ring initial offset 1.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 1, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 1 ) << QPointF( 2, 0 ) << QPointF( 1, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 1 ) << QPointF( 0, 2 ) );
+  QTest::newRow( "closed ring initial offset 1.0 num points" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 0.0
+    << 10
+    << ( QVector<QPointF>()
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 ) );
+
+  QTest::newRow( "closed ring 1.0 initial lag 1.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 1.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 ) );
+  QTest::newRow( "closed ring 2.0 initial lag" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 2.0
+    << 0.0
+    << 1.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 1 ) << QPointF( 1, 2 ) << QPointF( 2, 1 ) << QPointF( 1, 0 ) << QPointF( 0, 1 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 0.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 0.5
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 0, 1.5 )
+         << QPointF( 0.5, 2 )
+         << QPointF( 1.5, 2 )
+         << QPointF( 2, 1.5 )
+         << QPointF( 2, 0.5 )
+         << QPointF( 1.5, 0 )
+         << QPointF( 0.5, 0 )
+         << QPointF( 0, 0.5 )
+         << QPointF( 0, 1.5 ) );
+  QTest::newRow( "closed ring 1.0 initial offset 0.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.5
+    << 0.0
+    << 10
+    << ( QVector<QPointF>()
+         << QPointF( 0.5, 2 )
+         << QPointF( 1.5, 2 )
+         << QPointF( 2, 1.5 )
+         << QPointF( 2, 0.5 )
+         << QPointF( 1.5, 0 )
+         << QPointF( 0.5, 0 )
+         << QPointF( 0, 0.5 )
+         << QPointF( 0, 1.5 )
+         << QPointF( 0.5, 2.0 )
+         << QPointF( 1.5, 2.0 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 1.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 1.5
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 0, 0.5 )
+         << QPointF( 0, 1.5 )
+         << QPointF( 0.5, 2 )
+         << QPointF( 1.5, 2 )
+         << QPointF( 2, 1.5 )
+         << QPointF( 2, 0.5 )
+         << QPointF( 1.5, 0 )
+         << QPointF( 0.5, 0 )
+         << QPointF( 0, 0.5 )
+         << QPointF( 0, 1.5 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 2.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 2.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 3.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 3.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 3.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 3.5
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 1.5, 0 )
+         << QPointF( 0.5, 0 )
+         << QPointF( 0, 0.5 )
+         << QPointF( 0, 1.5 )
+         << QPointF( 0.5, 2 )
+         << QPointF( 1.5, 2 )
+         << QPointF( 2, 1.5 )
+         << QPointF( 2, 0.5 )
+         << QPointF( 1.5, 0 )
+         << QPointF( 0.5, 0 )
+         << QPointF( 0, 0.5 )
+         << QPointF( 0, 1.5 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 4.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 4.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 ) );
+  QTest::newRow( "closed ring 1.0 initial lag 5.0" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 1.0
+    << 0.0
+    << 5.0
+    << 0
+    << ( QVector<QPointF>()
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 )
+         << QPointF( 1, 2 )
+         << QPointF( 2, 2 )
+         << QPointF( 2, 1 )
+         << QPointF( 2, 0 )
+         << QPointF( 1, 0 )
+         << QPointF( 0, 0 )
+         << QPointF( 0, 1 )
+         << QPointF( 0, 2 ) );
+
+  QTest::newRow( "simulate initial offset 0.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) )
+    << 2.0
+    << 1.5
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0.5, 2 ) << QPointF( 2, 1.5 ) );
+  QTest::newRow( "simulate initial offset 0.5 lag 0.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) )
+    << 2.0
+    << 2.0 - ( 0.5 - 0.5 )
+    << 0.5 - 0.5
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) );
+
+  QTest::newRow( "simulate initial offset 0.5 lag 0.1" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) )
+    << 2.0
+    << 2.0 - ( 0.5 - 0.1 )
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0.4, 2 ) << QPointF( 2, 1.6 ) );
+  QTest::newRow( "simulate initial offset 0.1 lag 0.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) )
+    << 2.0
+    << 0.0
+    << 0.5 - 0.1
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 1.6, 2.0 ) << QPointF( 2.0, 0.4 ) );
+
+  QTest::newRow( "simulate initial offset 0.5 lag -0.1" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) )
+    << 2.0
+    << 2.0 - 0.5 - 0.1
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0.6, 2 ) << QPointF( 2, 1.4 ) );
+  QTest::newRow( "simulate initial offset 0.1 lag -0.5" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) )
+    << 2.0
+    << 2.0 - 0.1 - 0.5
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0.6, 2 ) << QPointF( 2.0, 1.4 ) );
+
+  QTest::newRow( "simulate initial offset 0.5 closed" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 2.0
+    << 1.5
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0.5, 2 ) << QPointF( 2, 1.5 ) << QPointF( 1.5, 0 ) << QPointF( 0.0, 0.5 ) );
+  QTest::newRow( "simulate initial offset 0.5 lag 0.1 closed" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 2.0
+    << 2.0 - ( 0.5 - 0.1 )
+    << 0.0
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0.4, 2 ) << QPointF( 2, 1.6 ) << QPointF( 1.6, 0 ) << QPointF( 0, 0.4 ) );
+  QTest::newRow( "simulate initial offset 0.1 lag 0.5 closed" )
+    << ( QVector<QPointF>() << QPointF( 0, 2 ) << QPointF( 2, 2 ) << QPointF( 2, 0 ) << QPointF( 0, 0 ) << QPointF( 0, 2 ) )
+    << 2.0
+    << 0.0
+    << 0.5 - 0.1
+    << 0
+    << ( QVector<QPointF>() << QPointF( 0, 1.6 ) << QPointF( 1.6, 2 ) << QPointF( 2.0, 0.4 ) << QPointF( 0.4, 0.0 ) << QPointF( 0.0, 1.6 ) );
+}
+
+void TestQgsMarkerLineSymbol::collectPoints()
+{
+  QFETCH( QVector<QPointF>, input );
+  QFETCH( double, interval );
+  QFETCH( double, initialOffset );
+  QFETCH( double, initialLag );
+  QFETCH( int, numberPointsRequired );
+  QFETCH( QVector<QPointF>, expected );
+
+  QVector<QPointF> dest;
+  QgsTemplatedLineSymbolLayerBase::collectOffsetPoints( input, dest, interval, initialOffset, nullptr, initialLag, numberPointsRequired );
+  QCOMPARE( dest, expected );
+}
+
+void TestQgsMarkerLineSymbol::parseBlankSegments_data()
+{
+  QTest::addColumn<QString>( "strBlankSegments" );
+  QTest::addColumn<QList<QList<QgsSymbolLayerUtils::BlankSegments>>>( "expectedBlankSegments" );
+  QTest::addColumn<bool>( "ok" );
+
+  QTest::newRow( "simple" ) << u"(((1 2, 3 4)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> { { { { 1, 2 }, { 3, 4 } } } } << true;
+  QTest::newRow( "multipart and ring" )
+    << u"(((1.1 2.2, 3.3 4.4),(5 6, 7 8)),((9 10, 11 12),(13 14, 15 16)))"_s
+    << QList<QList<QgsSymbolLayerUtils::BlankSegments>> { { { { 1.1, 2.2 }, { 3.3, 4.4 } }, { { 5, 6 }, { 7, 8 } } }, { { { 9, 10 }, { 11, 12 } }, { { 13, 14 }, { 15, 16 } } } }
+    << true;
+  QTest::newRow( "Empty ring" ) << u"(((1 2),(),(3 4)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> { { { { 1, 2 } }, {}, { { 3, 4 } } } } << true;
+
+  QTest::newRow( "Empty part" ) << u"(((1 2),(),(3 4)),(),((5 6)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> { { { { 1, 2 } }, {}, { { 3, 4 } } }, { {} }, { { { 5, 6 } } } } << true;
+
+  QTest::newRow( "Empty part with extra ()" ) << u"(((1 2),( ),(3 4)),(()),((5 6)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> { { { { 1, 2 } }, {}, { { 3, 4 } } }, { {} }, { { { 5, 6 } } } } << true;
+
+  QTest::newRow( "simple with tab" ) << u"(((1		2, 3 4)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> { { { { 1, 2 }, { 3, 4 } } } } << true;
+  QTest::newRow( "Error: text instead of number" ) << u"(((test)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: Distances not ordered" ) << u"(((3 4,1 2)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: start > end" ) << u"(((2 1,3 4)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: bad formatted number" ) << u"(((1.a56 2)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: too many number" ) << u"(((1.56 2 3)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: missing number" ) << u"(((1.56,2)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: Missing ')' parenthesis" ) << u"(((1.56 2))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+  QTest::newRow( "Error: Missing '(' parenthesis" ) << u"(((1.56 2)),(1 5)))"_s << QList<QList<QgsSymbolLayerUtils::BlankSegments>> {} << false;
+}
+
+void TestQgsMarkerLineSymbol::parseBlankSegments()
+{
+  QFETCH( QString, strBlankSegments );
+  QFETCH( QList<QList<QgsSymbolLayerUtils::BlankSegments>>, expectedBlankSegments );
+  QFETCH( bool, ok );
+
+  QgsRenderContext rc;
+  QString error;
+  QList<QList<QgsSymbolLayerUtils::BlankSegments>> blanksegments = QgsSymbolLayerUtils::parseBlankSegments( strBlankSegments, rc, Qgis::RenderUnit::Pixels, error );
+
+  QCOMPARE( ok, error.isEmpty() );
+  QCOMPARE( blanksegments, expectedBlankSegments );
+}
+
+void TestQgsMarkerLineSymbol::parseBlankSegmentsMapUnits()
+{
+  QgsRenderContext rc;
+  QgsMapToPixel m2p( 2 );
+  rc.setMapToPixel( m2p );
+
+  QString error;
+  QList<QList<QgsSymbolLayerUtils::BlankSegments>> blanksegments = QgsSymbolLayerUtils::parseBlankSegments( u"(((1 2, 3 4)))"_s, rc, Qgis::RenderUnit::MapUnits, error );
+  QList<QList<QgsSymbolLayerUtils::BlankSegments>> expectedBlankSegments { { { { 0.5, 1 }, { 1.5, 2 } } } };
+  QVERIFY( error.isEmpty() );
+  QCOMPARE( blanksegments, expectedBlankSegments );
+}
+
+void TestQgsMarkerLineSymbol::parseExtraItems_data()
+{
+  QTest::addColumn<QString>( "strExtraItems" );
+  QTest::addColumn<QgsSymbolLayerUtils::ExtraItems>( "expectedExtraItems" );
+  QTest::addColumn<bool>( "ok" );
+
+  QTest::newRow( "simple" ) << u"1 2 3, 3 4 5"_s << QgsSymbolLayerUtils::ExtraItems { { { 1, 2 }, 3 }, { { 3, 4 }, 5 } } << true;
+  QTest::newRow( "simple with tab" ) << u"1		2 3, 3 4 5"_s << QgsSymbolLayerUtils::ExtraItems { { { 1, 2 }, 3 }, { { 3, 4 }, 5 } } << true;
+  QTest::newRow( "Error: text instead of number" ) << u"test"_s << QgsSymbolLayerUtils::ExtraItems {} << false;
+  QTest::newRow( "Error: Negative coordinates" ) << u"-1	2 3, 3 -4 5"_s << QgsSymbolLayerUtils::ExtraItems { { { -1, 2 }, 3 }, { { 3, -4 }, 5 } } << true;
+  QTest::newRow( "Error: angle negative" ) << u"1 2 -20"_s << QgsSymbolLayerUtils::ExtraItems {} << false;
+  QTest::newRow( "Error: angle > 360" ) << u"1 2 400"_s << QgsSymbolLayerUtils::ExtraItems {} << false;
+  QTest::newRow( "Error: bad formatted number" ) << u"1.a56 2 3"_s << QgsSymbolLayerUtils::ExtraItems {} << false;
+  QTest::newRow( "Error: too many number" ) << u"1.56 2 3 4"_s << QgsSymbolLayerUtils::ExtraItems {} << false;
+  QTest::newRow( "Error: missing number" ) << u"1.56 2"_s << QgsSymbolLayerUtils::ExtraItems {} << false;
+  QTest::newRow( "empty" ) << u""_s << QgsSymbolLayerUtils::ExtraItems {} << true;
+  QTest::newRow( "empty with spaces" ) << u"  "_s << QgsSymbolLayerUtils::ExtraItems {} << true;
+}
+
+void TestQgsMarkerLineSymbol::parseExtraItems()
+{
+  QFETCH( QString, strExtraItems );
+  QFETCH( QgsSymbolLayerUtils::ExtraItems, expectedExtraItems );
+  QFETCH( bool, ok );
+
+  QgsRenderContext rc;
+  QString error;
+  QgsSymbolLayerUtils::ExtraItems extraItems = QgsSymbolLayerUtils::parseExtraItems( strExtraItems, error );
+
+  QCOMPARE( ok, error.isEmpty() );
+  QCOMPARE( extraItems, expectedExtraItems );
+}
+
+
+bool TestQgsMarkerLineSymbol::render( const QString &testType )
+{
+  mMapSettings->setOutputDpi( 96 );
+  QgsRenderChecker checker;
+  checker.setControlPathPrefix( u"symbol_markerline"_s );
+  checker.setControlName( "expected_" + testType );
+  checker.setMapSettings( *mMapSettings );
+  const bool result = checker.runTest( testType );
+  mReport += checker.report();
+  return result;
+}
+
+QGSTEST_MAIN( TestQgsMarkerLineSymbol )
+#include "testqgsmarkerlinesymbol.moc"

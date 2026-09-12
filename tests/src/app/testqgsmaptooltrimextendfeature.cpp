@@ -1,0 +1,526 @@
+/***************************************************************************
+     TestQgsMapToolTrimExtendFeature.cpp
+     --------------------------------
+    Date                 : October 2018
+    Copyright            : (C) 2018 by Loïc Bartoletti
+    Email                : loic dot bartoletti at oslandia dot com
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+#include <memory>
+
+#include "qgisapp.h"
+#include "qgsapplication.h"
+#include "qgscategorizedsymbolrenderer.h"
+#include "qgsgeometry.h"
+#include "qgsmapcanvas.h"
+#include "qgsmapcanvassnappingutils.h"
+#include "qgsmapmouseevent.h"
+#include "qgsmaptooltrimextendfeature.h"
+#include "qgsproject.h"
+#include "qgssettings.h"
+#include "qgssnappingconfig.h"
+#include "qgssnappingutils.h"
+#include "qgstest.h"
+#include "qgsvectordataprovider.h"
+#include "qgsvectorlayer.h"
+
+#include <QObject>
+#include <QString>
+
+using namespace Qt::StringLiterals;
+
+class TestQgsMapToolTrimExtendFeature : public QObject
+{
+    Q_OBJECT
+
+  public:
+    TestQgsMapToolTrimExtendFeature() = default;
+
+  private:
+    std::unique_ptr<QgsVectorLayer> vlPolygon, vlMultiLine, vlLineZ, vlTopoEdit, vlTopoLimit, vlMultiExtend;
+    QgsFeature f1, f2;
+    QgsMapCanvas *mCanvas = nullptr;
+
+  private slots:
+
+    void initTestCase()
+    {
+      QgsApplication::init();
+      QgsApplication::initQgis();
+      // Will make sure the settings dir with the style file for color ramp is created
+      QgsApplication::createDatabase();
+      QgsApplication::showSettings();
+
+
+      // vector layer with a triangle in a rectangle:
+      // (0,3) +-------------------+ (3,3)
+      //       | (1,2) +---+ (2,2) |
+      //       |        \  |       |
+      //       |         \ |       |
+      //       |          \|       |
+      //       |           + (2,1) |
+      // (0,0) +-------------------+ (3,0)
+      vlPolygon = std::make_unique<QgsVectorLayer>( u"MultiPolygon?crs=EPSG:3946&field=fld:int"_s, u"x"_s, u"memory"_s );
+      const int idx = vlPolygon->fields().indexFromName( u"fld"_s );
+      QVERIFY( idx != -1 );
+      f1.initAttributes( 1 );
+      f2.initAttributes( 1 );
+
+      QgsPolygonXY polygon;
+      QgsPolylineXY polyline;
+      polyline << QgsPointXY( 1, 2 ) << QgsPointXY( 2, 1 ) << QgsPointXY( 2, 2 ) << QgsPointXY( 1, 2 );
+      polygon << polyline;
+      const QgsGeometry polygonGeom = QgsGeometry::fromPolygonXY( polygon );
+      f1.setGeometry( polygonGeom );
+      f1.setAttribute( idx, QVariant( 1 ) );
+      QgsFeatureList flist;
+      flist << f1;
+      vlPolygon->dataProvider()->addFeatures( flist );
+
+      QgsPolygonXY polygon2;
+      QgsPolylineXY polyline2;
+      polyline2 << QgsPointXY( 0, 0 ) << QgsPointXY( 3, 0 ) << QgsPointXY( 3, 3 ) << QgsPointXY( 0, 3 ) << QgsPointXY( 0, 0 );
+      polygon2 << polyline2;
+      const QgsGeometry polygonGeom2 = QgsGeometry::fromPolygonXY( polygon2 );
+      f2.setGeometry( polygonGeom2 );
+      f2.setAttribute( idx, QVariant( 2 ) );
+      QgsFeatureList flist2;
+      flist2 << f2;
+      vlPolygon->dataProvider()->addFeatures( flist2 );
+
+
+      /*
+       *      |
+       *  |   |
+       *      |
+       * -----|
+       *      |
+       */
+
+      vlMultiLine = std::make_unique<QgsVectorLayer>( u"MultiLineString?crs=EPSG:3946&field=pk:int"_s, u"vl"_s, u"memory"_s );
+      QVERIFY( vlMultiLine->isValid() );
+      QgsFeature multi( vlMultiLine->dataProvider()->fields(), 1 );
+      multi.setAttribute( u"pk"_s, 1 );
+      multi.setGeometry( QgsGeometry::fromWkt( u"MultiLineString ((10 0, 14 0),(11 1, 11 0.5),(14 -2, 14 2))"_s ) );
+
+      vlMultiLine->dataProvider()->addFeatures( QgsFeatureList() << multi );
+
+
+      /*     (3 8 200)
+             /
+            /  (2 6 10)
+           /  \
+      (0 5 100)      (3 5 5)
+      */
+      vlLineZ = std::make_unique<QgsVectorLayer>( u"LineStringZ?crs=EPSG:3946&field=pk:int"_s, u"vl"_s, u"memory"_s );
+      QVERIFY( vlLineZ->isValid() );
+      QgsFeature linez( vlLineZ->dataProvider()->fields(), 1 );
+      linez.setAttribute( u"pk"_s, 1 );
+      linez.setGeometry( QgsGeometry::fromWkt( u"LineStringZ (3 5 5, 2 6 10)"_s ) );
+      QgsFeature linez2( vlLineZ->dataProvider()->fields(), 2 );
+      linez2.setAttribute( u"pk"_s, 2 );
+      linez2.setGeometry( QgsGeometry::fromWkt( u"LineStringZ (0 5 100, 3 8 200)"_s ) );
+
+      vlLineZ->dataProvider()->addFeatures( QgsFeatureList() << linez << linez2 );
+
+
+      /*
+       *       |
+       * ----  |
+       *       |
+       *
+       */
+      vlTopoEdit = std::make_unique<QgsVectorLayer>( u"LineString?crs=EPSG:3946&field=pk:int"_s, u"vl"_s, u"memory"_s );
+      QVERIFY( vlTopoEdit->isValid() );
+      vlTopoLimit = std::make_unique<QgsVectorLayer>( u"LineString?crs=EPSG:3946&field=pk:int"_s, u"vl"_s, u"memory"_s );
+      QVERIFY( vlTopoLimit->isValid() );
+      QgsFeature lineEdit( vlTopoEdit->dataProvider()->fields(), 1 );
+      lineEdit.setAttribute( u"pk"_s, 1 );
+      lineEdit.setGeometry( QgsGeometry::fromWkt( u" LineString (20 15, 25 15) "_s ) );
+      QgsFeature lineLimit( vlTopoLimit->dataProvider()->fields(), 1 );
+      lineLimit.setAttribute( u"pk"_s, 1 );
+      lineLimit.setGeometry( QgsGeometry::fromWkt( u" LineString (30 0, 30 30) "_s ) );
+
+      vlTopoEdit->dataProvider()->addFeatures( QgsFeatureList() << lineEdit );
+      vlTopoLimit->dataProvider()->addFeatures( QgsFeatureList() << lineLimit );
+
+
+      /*             + (2, 6)
+       *             |
+       *             |
+       *             + (2, 4)
+       *
+       *(0, 3) +----------------+ (5, 3)
+       *
+       *                 + (3, 2)
+       *                   `
+       *                     `
+       *                        + (5, 0)
+       */
+      vlMultiExtend = std::make_unique<QgsVectorLayer>( u"LineString?crs=EPSG:3946&field=pk:int"_s, u"vl"_s, u"memory"_s );
+      QVERIFY( vlMultiExtend->isValid() );
+
+      QgsFeature lineRef( vlTopoLimit->dataProvider()->fields(), 1 );
+      lineRef.setAttribute( u"pk"_s, 1 );
+      lineRef.setGeometry( QgsGeometry::fromWkt( u" LineString (0 3, 5 3) "_s ) );
+
+      QgsFeature line2( vlTopoLimit->dataProvider()->fields(), 2 );
+      line2.setAttribute( u"pk"_s, 2 );
+      line2.setGeometry( QgsGeometry::fromWkt( u" LineString (2 6, 2 4) "_s ) );
+
+      QgsFeature line3( vlTopoLimit->dataProvider()->fields(), 3 );
+      line3.setAttribute( u"pk"_s, 3 );
+      line3.setGeometry( QgsGeometry::fromWkt( u" LineString (3 2, 5 0) "_s ) );
+
+      vlMultiExtend->dataProvider()->addFeatures( QgsFeatureList() << lineRef << line2 << line3 );
+
+
+      mCanvas = new QgsMapCanvas();
+      mCanvas->setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:3946"_s ) );
+      mCanvas->setLayers( QList<QgsMapLayer *>() << vlPolygon.get() << vlMultiLine.get() << vlLineZ.get() << vlTopoEdit.get() << vlTopoLimit.get() << vlMultiExtend.get() );
+
+      QgsMapSettings mapSettings;
+      mapSettings.setOutputSize( QSize( 50, 50 ) );
+      mapSettings.setExtent( QgsRectangle( -1, -1, 4, 4 ) );
+      QVERIFY( mapSettings.hasValidSettings() );
+
+      mapSettings.setLayers( QList<QgsMapLayer *>() << vlPolygon.get() << vlMultiLine.get() << vlLineZ.get() << vlTopoEdit.get() << vlTopoLimit.get() << vlMultiExtend.get() );
+
+      QgsSnappingUtils *mSnappingUtils = new QgsMapCanvasSnappingUtils( mCanvas, this );
+      QgsSnappingConfig snappingConfig = mSnappingUtils->config();
+      mSnappingUtils->setMapSettings( mapSettings );
+      snappingConfig.setEnabled( true );
+      snappingConfig.setTolerance( 100 );
+      snappingConfig.setTypeFlag( static_cast<Qgis::SnappingTypes>( Qgis::SnappingType::Vertex | Qgis::SnappingType::Segment ) );
+      snappingConfig.setUnits( Qgis::MapToolUnit::Pixels );
+      snappingConfig.setMode( Qgis::SnappingMode::AllLayers );
+      mSnappingUtils->setConfig( snappingConfig );
+
+      mSnappingUtils->locatorForLayer( vlPolygon.get() )->init();
+      mSnappingUtils->locatorForLayer( vlMultiLine.get() )->init();
+      mSnappingUtils->locatorForLayer( vlLineZ.get() )->init();
+      mSnappingUtils->locatorForLayer( vlTopoEdit.get() )->init();
+      mSnappingUtils->locatorForLayer( vlTopoLimit.get() )->init();
+      mSnappingUtils->locatorForLayer( vlMultiExtend.get() )->init();
+
+      mCanvas->setSnappingUtils( mSnappingUtils );
+    }
+
+    void cleanupTestCase() { QgsApplication::exitQgis(); }
+
+
+    void testPolygon()
+    {
+      // vector layer with a triangle in a rectangle:
+      // (0,3) +-------------------+ (3,3)
+      //       | (1,2) +---+ (2,2) |
+      //       |        \  |       |
+      //       |         \ |       |
+      //       |          \|       |
+      //       |           + (2,1) |
+      // (0,0) +-------------------+ (3,0)
+      mCanvas->setCurrentLayer( vlPolygon.get() );
+      auto tool = std::make_unique<QgsMapToolTrimExtendFeature>( mCanvas );
+
+      vlPolygon->startEditing();
+      // Limit
+      QgsPointXY pt;
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 0, 0 );
+      auto event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 1, 1.5 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+
+      // vector layer with a trianglev in a rectangle:
+      // (0,3) +-------------------+ (3,3)
+      //       | (1,2) +---+ (2,2) |
+      //       |        \   \      |
+      //       |           \  \    |
+      //       |               \ \ |
+      //       |                  \|
+      // (0,0) +-------------------+ (3,0)
+      const QgsFeature f = vlPolygon->getFeature( 1 );
+
+      const QString wkt = "Polygon ((1 2, 3 0, 2 2, 1 2))";
+      QCOMPARE( f.geometry().asWkt(), wkt );
+
+      vlPolygon->rollBack();
+    }
+
+
+    void testMultiLine()
+    {
+      /*
+       *      |
+       *  |   |
+       *      |
+       * -----|
+       *      |
+       */
+      mCanvas->setCurrentLayer( vlMultiLine.get() );
+      auto tool = std::make_unique<QgsMapToolTrimExtendFeature>( mCanvas );
+
+      vlMultiLine->startEditing();
+      // Limit
+      QgsPointXY pt;
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 12, 0 );
+      auto event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 11, 0.8 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      /*
+       *(11 1)|
+       *  |   |
+       *  |   |
+       * -----|
+       *(11 0)|
+       */
+      QgsFeature f = vlMultiLine->getFeature( 1 );
+
+      QString wkt = "MultiLineString ((10 0, 14 0),(11 1, 11 0),(14 -2, 14 2))";
+      QCOMPARE( f.geometry().asWkt(), wkt );
+
+
+      // Limit
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 12, 0 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 14, 1 );
+
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      /*
+       *
+       *  |
+       *  |
+       * ------ (14 0)
+       *      |
+       *        (14 -2)
+       */
+      f = vlMultiLine->getFeature( 1 );
+      wkt = "MultiLineString ((10 0, 14 0),(11 1, 11 0),(14 -2, 14 0))";
+      QCOMPARE( f.geometry().asWkt(), wkt );
+
+      vlMultiLine->rollBack();
+
+
+      vlMultiLine->startEditing();
+      // Limit
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 12, 0 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 14, -1 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      /*
+       *      | (14 2)
+       *  |   |
+       *      |
+       * ------ (14 0)
+       *(10 0)
+       */
+      f = vlMultiLine->getFeature( 1 );
+
+      wkt = "MultiLineString ((10 0, 14 0),(11 1, 11 0.5),(14 0, 14 2))";
+      QCOMPARE( f.geometry().asWkt(), wkt );
+    }
+
+    void testLineZ()
+    {
+      /*     (3 8 200)
+             /
+            /  (2 6 10)
+           /  \
+      (0 5 100)      (3 5 5)
+      */
+      mCanvas->setCurrentLayer( vlLineZ.get() );
+      auto tool = std::make_unique<QgsMapToolTrimExtendFeature>( mCanvas );
+
+      vlLineZ->startEditing();
+      // Limit
+      QgsPointXY pt;
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 0, 5 );
+      auto event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 3, 5 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+
+      /*     (3 8 200)
+             /
+            /\ (1.5 6.5 150)
+           /  \
+      (0 5 100)      (3 5 5)
+      */
+      const QgsFeature f = vlLineZ->getFeature( 1 );
+
+      const QString wkt = "LineString Z (3 5 5, 1.5 6.5 150)";
+      QCOMPARE( f.geometry().asWkt(), wkt );
+
+      vlLineZ->rollBack();
+    }
+
+    void testTopologicalPoints()
+    {
+      const bool topologicalEditing = QgsProject::instance()->topologicalEditing();
+      QgsProject::instance()->setTopologicalEditing( true );
+
+      mCanvas->setCurrentLayer( vlTopoEdit.get() );
+      auto tool = std::make_unique<QgsMapToolTrimExtendFeature>( mCanvas );
+
+      vlTopoLimit->startEditing();
+      vlTopoEdit->startEditing();
+      // Limit
+      QgsPointXY pt;
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 30, 15 );
+      auto event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 22, 15 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      const QgsFeature fEdit = vlTopoEdit->getFeature( 1 );
+      const QgsFeature fLimit = vlTopoLimit->getFeature( 1 );
+
+      const QString wktEdit = "LineString (20 15, 30 15)";
+      const QString wktLimit = "LineString (30 0, 30 15, 30 30)";
+      QCOMPARE( fEdit.geometry().asWkt(), wktEdit );
+      QCOMPARE( fLimit.geometry().asWkt(), wktLimit );
+
+      vlTopoEdit->rollBack();
+
+      QgsProject::instance()->setTopologicalEditing( topologicalEditing );
+    }
+
+    void testMultipleExtend()
+    {
+      /*             + (2, 6)
+       *             |
+       *             |
+       *             + (2, 4)
+       *
+       *(0, 3) +----------------+ (5, 3)
+       *
+       *                 + (3, 2)
+       *                   `
+       *                     `
+       *                        + (5, 0)
+       */
+      mCanvas->setCurrentLayer( vlMultiExtend.get() );
+      auto tool = std::make_unique<QgsMapToolTrimExtendFeature>( mCanvas );
+
+      vlMultiExtend->startEditing();
+      // Limit
+      QgsPointXY pt;
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 1, 3 );
+      auto event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      // Extend
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 2, 5 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton, Qt::NoButton, Qt::ShiftModifier );
+      tool->canvasReleaseEvent( event.get() );
+
+
+      /*             + (2, 6)
+       *             |
+       *             |
+       *             |
+       *             | (2, 3)
+       *(0, 3) +-----+----------+ (5, 3)
+       *
+       *                 + (3, 2)
+       *                   `
+       *                     `
+       *                        + (5, 0)
+       */
+      const QgsFeature line2 = vlMultiExtend->getFeature( 2 );
+
+      QString wkt = "LineString (2 6, 2 3)";
+      QCOMPARE( line2.geometry().asWkt(), wkt );
+
+
+      // Extend 2
+      pt = tool->canvas()->mapSettings().mapToPixel().transform( 4, 1 );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseMove, pt.toQPointF().toPoint() );
+      tool->canvasMoveEvent( event.get() );
+      event = std::make_unique<QgsMapMouseEvent>( mCanvas, QEvent::MouseButtonRelease, pt.toQPointF().toPoint(), Qt::LeftButton );
+      tool->canvasReleaseEvent( event.get() );
+
+      /*             + (2, 6)
+       *             |
+       *             |
+       *             |
+       *             | (2, 3)
+       *(0, 3) +-----+----------+ (5, 3)
+       *               `
+       *                 `
+       *                   `
+       *                     `
+       *                        + (5, 0)
+       */
+
+      const QgsFeature line3 = vlMultiExtend->getFeature( 3 );
+
+      wkt = "LineString (2 3, 5 0)";
+      QCOMPARE( line3.geometry().asWkt(), wkt );
+      vlMultiExtend->rollBack();
+    }
+};
+
+QGSTEST_MAIN( TestQgsMapToolTrimExtendFeature )
+#include "testqgsmaptooltrimextendfeature.moc"

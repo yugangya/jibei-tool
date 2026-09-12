@@ -1,0 +1,200 @@
+/***************************************************************************
+
+   testqgsserverquerystringparameter.cpp
+     --------------------------------------
+    Date                 : Jul 10 2019
+    Copyright            : (C) 2019 by Alessandro Pasotti
+    Email                : elpaso at itopen dot it
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+#include "qgstest.h"
+
+#include <QObject>
+#include <QString>
+#include <QStringList>
+
+using namespace Qt::StringLiterals;
+
+//qgis includes...
+#include "qgsserverquerystringparameter.h"
+#include "qgsserverapicontext.h"
+#include "qgsserverrequest.h"
+#include "qgsserverexception.h"
+#include "qgsrequesthandler.h"
+#include "qgsbufferserverrequest.h"
+#include "qgsbufferserverresponse.h"
+
+/**
+ * \ingroup UnitTests
+ * Unit tests for the server query string parameter
+ */
+class TestQgsServerQueryStringParameter : public QObject
+{
+    Q_OBJECT
+
+  public:
+    TestQgsServerQueryStringParameter() = default;
+
+  private slots:
+    // will be called before the first testfunction is executed.
+    void initTestCase();
+
+    // will be called after the last testfunction was executed.
+    void cleanupTestCase();
+
+    // will be called before each testfunction is executed
+    void init();
+
+    // will be called after every testfunction.
+    void cleanup();
+
+    // Basic test on types and constraints
+    void testArguments();
+
+    // Test custom validators
+    void testCustomValidators();
+
+    // Test default values
+    void testDefaultValues();
+
+    // Test QgsRequestHandler::parseInput (i.e. POST requests) with special chars
+    void testParseInput();
+};
+
+
+void TestQgsServerQueryStringParameter::initTestCase()
+{
+  QgsApplication::init();
+  QgsApplication::initQgis();
+  QgsApplication::showSettings();
+}
+
+void TestQgsServerQueryStringParameter::cleanupTestCase()
+{
+  QgsApplication::exitQgis();
+}
+
+void TestQgsServerQueryStringParameter::init()
+{}
+
+void TestQgsServerQueryStringParameter::cleanup()
+{}
+
+void TestQgsServerQueryStringParameter::testArguments()
+{
+  QgsServerQueryStringParameter p { u"parameter1"_s };
+  QgsServerRequest request;
+  const QgsServerApiContext ctx { "/wfs3", &request, nullptr, nullptr, nullptr };
+
+  // Test string (default)
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=123"_s );
+  QCOMPARE( p.value( ctx ).toString(), QString( "123" ) );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::QString );
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=a%20string"_s );
+  QCOMPARE( p.value( ctx ).toString(), QString( "a string" ) );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::QString );
+  request.setUrl( u"http://www.qgis.org/api/"_s );
+  QCOMPARE( p.value( ctx ).toString(), QString() );
+
+  // Test required
+  p.mRequired = true;
+  request.setUrl( u"http://www.qgis.org/api/"_s );
+  QVERIFY_EXCEPTION_THROWN( p.value( ctx ), QgsServerApiBadRequestException );
+
+  // Test int
+  p.mType = QgsServerQueryStringParameter::Type::Integer;
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=123"_s );
+  QCOMPARE( p.value( ctx ).toInt(), 123 );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::LongLong );
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=a%20string"_s );
+  QVERIFY_EXCEPTION_THROWN( p.value( ctx ), QgsServerApiBadRequestException );
+
+  // Test double
+  p.mType = QgsServerQueryStringParameter::Type::Double;
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=123"_s );
+  QCOMPARE( p.value( ctx ).toDouble(), 123.0 );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::Double );
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=123.456"_s );
+  QCOMPARE( p.value( ctx ).toDouble(), 123.456 );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::Double );
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=a%20string"_s );
+  QVERIFY_EXCEPTION_THROWN( p.value( ctx ), QgsServerApiBadRequestException );
+  QCOMPARE( QString::fromStdString( p.data()["schema"]["type"] ), QString( "number" ) );
+
+  // Test list
+  p.mType = QgsServerQueryStringParameter::Type::List;
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=123,a%20value"_s );
+  QCOMPARE( p.value( ctx ).toStringList(), QStringList() << u"123"_s << u"a value"_s );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::QStringList );
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=a%20value"_s );
+  QCOMPARE( p.value( ctx ).toStringList(), QStringList() << u"a value"_s );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::QStringList );
+}
+
+void TestQgsServerQueryStringParameter::testCustomValidators()
+{
+  QgsServerQueryStringParameter p { u"parameter1"_s, true, QgsServerQueryStringParameter::Type::Integer };
+  QgsServerRequest request;
+  const QgsServerApiContext ctx { "/wfs3", &request, nullptr, nullptr, nullptr };
+
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=123"_s );
+  QCOMPARE( p.value( ctx ).toInt(), 123 );
+
+  // Test a range validator that increments the value
+  const QgsServerQueryStringParameter::customValidator validator = []( const QgsServerApiContext &, QVariant &value ) -> bool {
+    const auto v { value.toLongLong() };
+    // Change the value by adding 1
+    value.setValue( v + 1 );
+    return v > 500 && v < 1000;
+  };
+  p.setCustomValidator( validator );
+  QVERIFY_EXCEPTION_THROWN( p.value( ctx ), QgsServerApiBadRequestException );
+
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=501"_s );
+  QCOMPARE( p.value( ctx ).toInt(), 502 );
+  QCOMPARE( static_cast<QMetaType::Type>( p.value( ctx ).userType() ), QMetaType::Type::LongLong );
+}
+
+void TestQgsServerQueryStringParameter::testDefaultValues()
+{
+  // Set a default AND required, verify it's ignored
+  const QgsServerQueryStringParameter p { u"parameter1"_s, true, QgsServerQueryStringParameter::Type::Integer, u"Paramerer 1"_s, 10 };
+  QgsServerRequest request;
+  const QgsServerApiContext ctx { "/wfs3", &request, nullptr, nullptr, nullptr };
+
+  request.setUrl( u"http://www.qgis.org/api/"_s );
+  QVERIFY_EXCEPTION_THROWN( p.value( ctx ), QgsServerApiBadRequestException );
+
+  const QgsServerQueryStringParameter p2 { u"parameter1"_s, false, QgsServerQueryStringParameter::Type::Integer, u"Paramerer 1"_s, 10 };
+  QCOMPARE( p2.value( ctx ).toInt(), 10 );
+  request.setUrl( u"http://www.qgis.org/api/?parameter1=501"_s );
+  QCOMPARE( p2.value( ctx ).toInt(), 501 );
+}
+
+void TestQgsServerQueryStringParameter::testParseInput()
+{
+  // Request with layers "a", "b", "c" and "äös + %&#"
+  QByteArray data( "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=a%2Cb%2Cc%2C%C3%A4%C3%B6s+%2B+%25%26%23" );
+  QgsBufferServerRequest request( u"http://localhost/wms/test"_s, QgsServerRequest::PostMethod, QgsServerRequest::Headers(), &data );
+  QgsBufferServerResponse response;
+
+  QgsRequestHandler requestHandler( request, response );
+  requestHandler.parseInput();
+
+  const QgsServerParameters params = request.serverParameters();
+  QMap<QString, QString> paramsMap = params.toMap();
+  QCOMPARE( paramsMap["SERVICE"], u"WMS"_s );
+  QCOMPARE( paramsMap["VERSION"], u"1.3.0"_s );
+  QCOMPARE( paramsMap["REQUEST"], u"GetMap"_s );
+  QCOMPARE( paramsMap["LAYERS"], u"a,b,c,äös + %&#"_s );
+}
+
+
+QGSTEST_MAIN( TestQgsServerQueryStringParameter )
+#include "testqgsserverquerystringparameter.moc"

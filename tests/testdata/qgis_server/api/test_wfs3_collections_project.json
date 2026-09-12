@@ -1,0 +1,262 @@
+Content-Type: application/json
+
+{
+  "collections": [
+    {
+      "crs": [
+        "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        "http://www.opengis.net/def/crs/EPSG/0/4326",
+        "http://www.opengis.net/def/crs/EPSG/0/3857"
+      ],
+      "description": "A test vector layer with unicode òà",
+      "extent": {
+        "spatial": {
+          "bbox": [
+            [
+              8.203459307036344,
+              44.90139483904469,
+              8.203546993993488,
+              44.901482526001836
+            ]
+          ],
+          "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+        },
+        "temporal": {
+          "interval": null,
+          "trs": "http://www.opengis.net/def/uom/ISO-8601/0/Gregorian"
+        }
+      },
+      "id": "testlayer èé",
+      "links": [
+        {
+          "href": "http://server.qgis.org/wfs3/collections/testlayer%20%C3%A8%C3%A9/items.geojson",
+          "rel": "items",
+          "title": "A test wfs vector layer èé as GeoJSON",
+          "type": "application/geo+json"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/testlayer%20%C3%A8%C3%A9/items.html",
+          "rel": "items",
+          "title": "A test wfs vector layer èé as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/testlayer%20%C3%A8%C3%A9/items.fgb",
+          "rel": "items",
+          "title": "A test wfs vector layer èé as FlatGeobuf",
+          "type": "application/flatgeobuf"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/testlayer%20%C3%A8%C3%A9/queryables.html",
+          "rel": "queryables",
+          "title": "Queryables of A test wfs vector layer èé as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/testlayer%20%C3%A8%C3%A9/queryables.json",
+          "rel": "queryables",
+          "title": "Queryables of A test wfs vector layer èé as JSON",
+          "type": "application/json"
+        }
+      ],
+      "title": "A test wfs vector layer èé"
+    },
+    {
+      "crs": [
+        "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        "http://www.opengis.net/def/crs/EPSG/0/4326",
+        "http://www.opengis.net/def/crs/EPSG/0/3857"
+      ],
+      "description": "A Layer1 with an abstract",
+      "extent": {
+        "spatial": {
+          "bbox": [
+            [
+              8.203459307036344,
+              44.90139483904469,
+              8.203546993993488,
+              44.901482526001836
+            ]
+          ],
+          "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+        },
+        "temporal": {
+          "interval": null,
+          "trs": "http://www.opengis.net/def/uom/ISO-8601/0/Gregorian"
+        }
+      },
+      "id": "layer1_with_short_name",
+      "links": [
+        {
+          "href": "http://server.qgis.org/wfs3/collections/layer1_with_short_name/items.geojson",
+          "rel": "items",
+          "title": "A Layer1 with a short name as GeoJSON",
+          "type": "application/geo+json"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/layer1_with_short_name/items.html",
+          "rel": "items",
+          "title": "A Layer1 with a short name as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/layer1_with_short_name/items.fgb",
+          "rel": "items",
+          "title": "A Layer1 with a short name as FlatGeobuf",
+          "type": "application/flatgeobuf"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/layer1_with_short_name/queryables.html",
+          "rel": "queryables",
+          "title": "Queryables of A Layer1 with a short name as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/layer1_with_short_name/queryables.json",
+          "rel": "queryables",
+          "title": "Queryables of A Layer1 with a short name as JSON",
+          "type": "application/json"
+        }
+      ],
+      "title": "A Layer1 with a short name"
+    },
+    {
+      "crs": [
+        "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        "http://www.opengis.net/def/crs/EPSG/0/4326",
+        "http://www.opengis.net/def/crs/EPSG/0/3857"
+      ],
+      "description": "A test vector layer with unicode òà",
+      "extent": {
+        "spatial": {
+          "bbox": [
+            [
+              8.203459307036344,
+              44.90139483904469,
+              8.203546993993488,
+              44.901482526001836
+            ]
+          ],
+          "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+        },
+        "temporal": {
+          "interval": null,
+          "trs": "http://www.opengis.net/def/uom/ISO-8601/0/Gregorian"
+        }
+      },
+      "id": "exclude_attribute",
+      "links": [
+        {
+          "href": "http://server.qgis.org/wfs3/collections/exclude_attribute/items.geojson",
+          "rel": "items",
+          "title": "A test vector layer exclude attrs as GeoJSON",
+          "type": "application/geo+json"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/exclude_attribute/items.html",
+          "rel": "items",
+          "title": "A test vector layer exclude attrs as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/exclude_attribute/items.fgb",
+          "rel": "items",
+          "title": "A test vector layer exclude attrs as FlatGeobuf",
+          "type": "application/flatgeobuf"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/exclude_attribute/queryables.html",
+          "rel": "queryables",
+          "title": "Queryables of A test vector layer exclude attrs as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/exclude_attribute/queryables.json",
+          "rel": "queryables",
+          "title": "Queryables of A test vector layer exclude attrs as JSON",
+          "type": "application/json"
+        }
+      ],
+      "title": "A test vector layer exclude attrs"
+    },
+    {
+      "crs": [
+        "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        "http://www.opengis.net/def/crs/EPSG/0/4326",
+        "http://www.opengis.net/def/crs/EPSG/0/3857"
+      ],
+      "description": "A test vector layer with aliases",
+      "extent": {
+        "spatial": {
+          "bbox": [
+            [
+              8.203459307036344,
+              44.90139483904469,
+              8.203546993993488,
+              44.901482526001836
+            ]
+          ],
+          "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+        },
+        "temporal": {
+          "interval": null,
+          "trs": "http://www.opengis.net/def/uom/ISO-8601/0/Gregorian"
+        }
+      },
+      "id": "fields_alias",
+      "links": [
+        {
+          "href": "http://server.qgis.org/wfs3/collections/fields_alias/items.geojson",
+          "rel": "items",
+          "title": "A test vector layer with aliases as GeoJSON",
+          "type": "application/geo+json"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/fields_alias/items.html",
+          "rel": "items",
+          "title": "A test vector layer with aliases as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/fields_alias/items.fgb",
+          "rel": "items",
+          "title": "A test vector layer with aliases as FlatGeobuf",
+          "type": "application/flatgeobuf"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/fields_alias/queryables.html",
+          "rel": "queryables",
+          "title": "Queryables of A test vector layer with aliases as HTML",
+          "type": "text/html"
+        },
+        {
+          "href": "http://server.qgis.org/wfs3/collections/fields_alias/queryables.json",
+          "rel": "queryables",
+          "title": "Queryables of A test vector layer with aliases as JSON",
+          "type": "application/json"
+        }
+      ],
+      "title": "A test vector layer with aliases"
+    }
+  ],
+  "crs": [
+    "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+    "http://www.opengis.net/def/crs/EPSG/0/4326",
+    "http://www.opengis.net/def/crs/EPSG/0/3857"
+  ],
+  "links": [
+    {
+      "href": "http://server.qgis.org/wfs3/collections.json",
+      "rel": "self",
+      "title": "Feature collections as JSON",
+      "type": "application/json"
+    },
+    {
+      "href": "http://server.qgis.org/wfs3/collections.html",
+      "rel": "alternate",
+      "title": "Feature collections as HTML",
+      "type": "text/html"
+    }
+  ],
+  "timeStamp": "2019-07-05T12:27:07Z"
+}

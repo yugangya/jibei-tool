@@ -1,0 +1,239 @@
+/***************************************************************************
+     testqgsinvertedpolygonrenderer.cpp
+     --------------------------------------
+    Date                 : 23 may 2014
+    Copyright            : (C) 2014 by Hugo Mercier / Oslandia
+    Email                : hugo dot mercier at oslandia dot com
+ ***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+#include "qgstest.h"
+
+#include <QApplication>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFileInfo>
+#include <QObject>
+#include <QString>
+#include <QStringList>
+
+using namespace Qt::StringLiterals;
+
+//qgis includes...
+#include <qgsmaplayer.h>
+#include <qgsvectorlayer.h>
+#include <qgsapplication.h>
+#include <qgsproviderregistry.h>
+#include <qgsproject.h>
+#include "qgsrenderer.h"
+#include "qgsfillsymbol.h"
+#include "qgsinvertedpolygonrenderer.h"
+#include "qgssinglesymbolrenderer.h"
+//qgis test includes
+#include "qgsmultirenderchecker.h"
+
+/**
+ * \ingroup UnitTests
+ * This is a unit test for the different renderers for vector layers.
+ */
+class TestQgsInvertedPolygon : public QgsTest
+{
+    Q_OBJECT
+
+  public:
+    TestQgsInvertedPolygon()
+      : QgsTest( u"Inverted Polygon Renderer Tests"_s, u"symbol_invertedpolygon"_s )
+    {}
+
+  private slots:
+    void initTestCase();    // will be called before the first testfunction is executed.
+    void cleanupTestCase(); // will be called after the last testfunction was executed.
+
+    void singleSubRenderer();
+    void graduatedSubRenderer();
+    void checkSymbolItem();
+    void preprocess();
+    void projectionTest();
+    void projectionWithSimplificationTest();
+    void curvedPolygons();
+    void rotationTest();
+
+  private:
+    bool mTestHasError = false;
+    bool setQml( QgsVectorLayer *vlayer, const QString &qmlFile );
+    bool imageCheck( const QString &type, const QgsRectangle * = nullptr );
+    QgsMapSettings mMapSettings;
+    QgsVectorLayer *mpPolysLayer = nullptr;
+    QString mTestDataDir;
+};
+
+
+void TestQgsInvertedPolygon::initTestCase()
+{
+  mTestHasError = false;
+  // init QGIS's paths - true means that all path will be inited from prefix
+  QgsApplication::init();
+  QgsApplication::initQgis();
+  QgsApplication::showSettings();
+
+  const QString myDataDir( TEST_DATA_DIR ); //defined in CmakeLists.txt
+  mTestDataDir = myDataDir + '/';
+
+  //
+  //create a poly layer that will be used in all tests...
+  //
+  const QString myPolysFileName = mTestDataDir + "polys_overlapping.shp";
+  const QFileInfo myPolyFileInfo( myPolysFileName );
+  mpPolysLayer = new QgsVectorLayer( myPolyFileInfo.filePath(), myPolyFileInfo.completeBaseName(), u"ogr"_s );
+  QgsVectorSimplifyMethod simplifyMethod;
+  simplifyMethod.setSimplifyHints( Qgis::VectorRenderingSimplificationFlags() );
+  mpPolysLayer->setSimplifyMethod( simplifyMethod );
+
+  mMapSettings.setLayers( QList<QgsMapLayer *>() << mpPolysLayer );
+}
+
+void TestQgsInvertedPolygon::cleanupTestCase()
+{
+  delete mpPolysLayer;
+
+  QgsApplication::exitQgis();
+}
+
+void TestQgsInvertedPolygon::singleSubRenderer()
+{
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_single.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_single" ) );
+}
+
+void TestQgsInvertedPolygon::graduatedSubRenderer()
+{
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_graduated.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_graduated" ) );
+}
+
+void TestQgsInvertedPolygon::checkSymbolItem()
+{
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_rule.qml" ) );
+  const QString firstRuleKey = mpPolysLayer->renderer()->legendSymbolItems().first().ruleKey();
+  QVERIFY( mpPolysLayer->renderer()->legendSymbolItemChecked( firstRuleKey ) );
+  mpPolysLayer->renderer()->checkLegendSymbolItem( firstRuleKey, false );
+  QVERIFY( !mpPolysLayer->renderer()->legendSymbolItemChecked( firstRuleKey ) );
+}
+
+void TestQgsInvertedPolygon::preprocess()
+{
+  // FIXME will have to find some overlapping polygons
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_preprocess.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_preprocess" ) );
+}
+
+void TestQgsInvertedPolygon::projectionTest()
+{
+  mMapSettings.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:2154"_s ) );
+  const QgsRectangle extent( QgsPointXY( -8639421, 8382691 ), QgsPointXY( -3969110, 12570905 ) );
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_single.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_projection", &extent ) );
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_preprocess.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_projection2", &extent ) );
+  mMapSettings.setDestinationCrs( mpPolysLayer->crs() );
+}
+
+void TestQgsInvertedPolygon::projectionWithSimplificationTest()
+{
+  auto polyLayer = std::make_unique<QgsVectorLayer>( testDataPath( "polys.shp" ), u"polys"_s );
+  QVERIFY( polyLayer->isValid() );
+  QgsMapSettings mapSettings;
+  mapSettings.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:4326"_s ) );
+  mapSettings.setLayers( QList<QgsMapLayer *>() << polyLayer.get() );
+  mapSettings.setOutputDpi( 96 );
+
+  QgsFillSymbol *fill = QgsFillSymbol::createSimple( QVariantMap( { { "color", "#fdbf6f" }, { "outline_color", "black" }, { "outline_width", "1" } } ) ).release();
+  QgsInvertedPolygonRenderer *renderer = new QgsInvertedPolygonRenderer();
+  QgsSingleSymbolRenderer *singleSymbolRenderer = new QgsSingleSymbolRenderer( fill );
+  renderer->setEmbeddedRenderer( singleSymbolRenderer );
+  polyLayer->setRenderer( renderer );
+
+  mapSettings.setExtent( QgsRectangle( -119.552, 25.255, -109.393, 32.651 ) );
+
+  QgsVectorSimplifyMethod simplifyMethod;
+  simplifyMethod.setSimplifyHints( Qgis::VectorRenderingSimplificationFlag::GeometrySimplification );
+  simplifyMethod.setForceLocalOptimization( true );
+  simplifyMethod.setSimplifyAlgorithm( Qgis::VectorSimplificationAlgorithm::SnappedToGridGlobal );
+  simplifyMethod.setThreshold( 0.1f );
+  mapSettings.setSimplifyMethod( simplifyMethod );
+
+  QGSVERIFYRENDERMAPSETTINGSCHECK( u"inverted_polys_projection_simplification"_s, u"inverted_polys_projection_simplification"_s, mapSettings );
+}
+
+void TestQgsInvertedPolygon::curvedPolygons()
+{
+  const QString myCurvedPolysFileName = mTestDataDir + "curved_polys.gpkg";
+  const QFileInfo myCurvedPolyFileInfo( myCurvedPolysFileName );
+  QgsVectorLayer *curvedLayer = new QgsVectorLayer( myCurvedPolyFileInfo.filePath() + "|layername=polys", myCurvedPolyFileInfo.completeBaseName(), "ogr" );
+  QgsProject::instance()->addMapLayers( QList<QgsMapLayer *>() << curvedLayer );
+
+  mMapSettings.setLayers( QList<QgsMapLayer *>() << curvedLayer );
+  QVERIFY( setQml( curvedLayer, "inverted_polys_single.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_curved" ) );
+  mMapSettings.setLayers( QList<QgsMapLayer *>() << mpPolysLayer );
+}
+
+void TestQgsInvertedPolygon::rotationTest()
+{
+  mMapSettings.setRotation( 45 );
+  QVERIFY( setQml( mpPolysLayer, "inverted_polys_single.qml" ) );
+  QVERIFY( imageCheck( "inverted_polys_rotation" ) );
+  mMapSettings.setRotation( 0 );
+}
+
+
+//
+// Private helper functions not called directly by CTest
+//
+
+bool TestQgsInvertedPolygon::setQml( QgsVectorLayer *vlayer, const QString &qmlFile )
+{
+  //load a qml style and apply to our layer
+  //the style will correspond to the renderer
+  //type we are testing
+  bool myStyleFlag = false;
+  const QString myFileName = mTestDataDir + qmlFile;
+  const QString error = vlayer->loadNamedStyle( myFileName, myStyleFlag );
+  if ( !myStyleFlag )
+  {
+    qDebug( "%s", error.toLocal8Bit().constData() );
+    return false;
+  }
+  return myStyleFlag;
+}
+
+bool TestQgsInvertedPolygon::imageCheck( const QString &testType, const QgsRectangle *extent )
+{
+  //use the QgsRenderChecker test utility class to
+  //ensure the rendered output matches our control image
+  if ( !extent )
+  {
+    mMapSettings.setExtent( mpPolysLayer->extent() );
+  }
+  else
+  {
+    mMapSettings.setExtent( *extent );
+  }
+  mMapSettings.setOutputDpi( 96 );
+  QgsMultiRenderChecker myChecker;
+  myChecker.setControlPathPrefix( u"symbol_invertedpolygon"_s );
+  myChecker.setControlName( "expected_" + testType );
+  myChecker.setMapSettings( mMapSettings );
+  myChecker.setColorTolerance( 20 );
+  const bool myResultFlag = myChecker.runTest( testType, 100 );
+  mReport += myChecker.report();
+  return myResultFlag;
+}
+
+QGSTEST_MAIN( TestQgsInvertedPolygon )
+#include "testqgsinvertedpolygonrenderer.moc"

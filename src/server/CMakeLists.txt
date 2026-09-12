@@ -1,0 +1,212 @@
+#
+# Find deps
+#
+find_package(Fcgi REQUIRED)
+if (NOT FCGI_FOUND)
+  message (SEND_ERROR "Fast CGI dependency was not found!")
+endif()
+
+if (CMAKE_BUILD_TYPE MATCHES Debug OR CMAKE_BUILD_TYPE MATCHES RelWithDebInfo)
+  add_definitions(-DQGSMSDEBUG=1)
+endif()
+
+add_subdirectory(services)
+
+########################################################
+# Files
+
+set(QGIS_SERVER_SRCS
+  qgsbufferserverrequest.cpp
+  qgsbufferserverresponse.cpp
+  qgscapabilitiescache.cpp
+  qgsconfigcache.cpp
+  qgsfcgiserverrequest.cpp
+  qgsfcgiserverresponse.cpp
+  qgsfilterresponsedecorator.cpp
+  qgsfilterrestorer.cpp
+  qgsrequesthandler.cpp
+  qgsserver.cpp
+  qgsserverapi.cpp
+  qgsserverogcapi.cpp
+  qgsserverogcapihandler.cpp
+  qgsserverstatichandler.cpp
+  qgsserverapiutils.cpp
+  qgsserverapicontext.cpp
+  qgsserverparameters.cpp
+  qgsserverexception.cpp
+  qgsserverfilter.cpp
+  qgsserverfeatureid.cpp
+  qgsserverinterface.cpp
+  qgsserverinterfaceimpl.cpp
+  qgsserverlogger.cpp
+  qgsserverprojectutils.cpp
+  qgsserverrequest.cpp
+  qgsserverresponse.cpp
+  qgsserversettings.cpp
+  qgsservice.cpp
+  qgsservicenativeloader.cpp
+  qgsserviceregistry.cpp
+  qgsfeaturefilterprovidergroup.cpp
+  qgsdimensionfilter.cpp
+  qgsfeaturefilter.cpp
+  qgsstorebadlayerinfo.cpp
+  qgsserverquerystringparameter.cpp
+)
+
+set (QGIS_SERVER_HDRS
+  qgscapabilitiescache.h
+  qgsconfigcache.h
+  qgsmapserviceexception.h
+  qgsserverapi.h
+  qgsserverapicontext.h
+  qgsserverlogger.h
+  qgsserverogcapi.h
+  qgsserverogcapihandler.h
+  qgsserverstatichandler.h
+  qgsserverparameters.h
+  qgsserverfeatureid.h
+  qgsserverquerystringparameter.h
+  qgsserversettings.h
+  qgsservicemodule.h
+)
+
+
+#############################################################
+# qgis_server library
+
+if (WITH_SERVER_PLUGINS)
+  set(QGIS_SERVER_SRCS ${QGIS_SERVER_SRCS}
+    qgsserverplugins.cpp
+    qgsaccesscontrolfilter.cpp
+    qgsaccesscontrol.cpp
+    qgsservercachefilter.cpp
+    qgsservercachemanager.cpp
+  )
+endif()
+
+if(NOT LIBRARY_TYPE EQUAL STATIC)
+  win32_version_info("QGIS Server Core" "qgis_server" QGIS_SERVER_SRCS)
+endif()
+
+add_library(qgis_server SHARED ${QGIS_SERVER_SRCS} ${QGIS_SERVER_HDRS})
+if(QGISPOSTFIX)
+  set_target_properties(qgis_server PROPERTIES
+    RUNTIME_OUTPUT_NAME qgis_server${QGISPOSTFIX}
+    LIBRARY_OUTPUT_NAME qgis_server${QGISPOSTFIX}
+  )
+endif()
+
+if (USE_PRECOMPILED_HEADERS)
+  target_precompile_headers(qgis_server PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_SOURCE_DIR}/src/core/qgis.h>)
+endif()
+
+# fcgi's stdio hacks fail in unity builds on msvc (see https://cdash.orfeo-toolbox.org/viewBuildError.php?buildid=37453)
+# Example:
+# …\include\__msvc_filebuf.hpp(86): error C2664: 'wint_t fgetwc(FILE *)': cannot convert argument 1 from 'FCGI_FILE *' to 'FILE *'
+if(NOT MSVC)
+  set_target_properties(qgis_server PROPERTIES UNITY_BUILD ${ENABLE_UNITY_BUILDS})
+endif(NOT MSVC)
+
+target_include_directories(qgis_server SYSTEM PUBLIC
+  ${CMAKE_SOURCE_DIR}/external/inja
+  ${FCGI_INCLUDE_DIR}
+)
+
+target_include_directories(qgis_server PUBLIC
+  ${CMAKE_BINARY_DIR}/src/server
+)
+
+GENERATE_EXPORT_HEADER(
+  qgis_server
+  BASE_NAME SERVER
+  EXPORT_FILE_NAME qgis_server.h
+)
+
+#generate unversioned libs for android
+if (NOT ANDROID)
+  set_target_properties(qgis_server PROPERTIES
+    VERSION ${COMPLETE_VERSION}
+    SOVERSION ${COMPLETE_VERSION}
+  )
+endif()
+
+target_link_libraries(qgis_server
+  qgis_core
+  ${FCGI_LIBRARY}
+  ${QCA_LIBRARY}
+)
+
+if (WITH_ANALYSIS)
+  target_link_libraries(qgis_server qgis_analysis)
+endif()
+
+if (WITH_BINDINGS)
+  target_link_libraries(qgis_server qgispython)
+endif()
+
+if (APPLE)
+  set_target_properties(qgis_server PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+endif()
+
+
+# install
+
+install(TARGETS qgis_server
+  RUNTIME DESTINATION ${QGIS_BIN_DIR}
+  LIBRARY DESTINATION ${QGIS_LIB_DIR}
+  ARCHIVE DESTINATION ${QGIS_LIB_DIR}
+  FRAMEWORK DESTINATION ${QGIS_FW_SUBDIR}
+  PUBLIC_HEADER DESTINATION ${QGIS_INCLUDE_DIR}
+)
+
+# end qgis_server library
+
+# add test resources, e.g. standard test font
+set(QGIS_SERVER_TESTRCCS ../../tests/testdata/testdata.qrc)
+
+SET(QGIS_SERVER_EX_SRCS qgis_map_serv.cpp)
+win32_icon(QGIS_SERVER_EX_SRCS)
+win32_version_info("QGIS Server" "qgis_mapserv.fcgi" QGIS_SERVER_EX_SRCS)
+add_executable(qgis_mapserv.fcgi ${QGIS_SERVER_EX_SRCS} ${QGIS_SERVER_TESTRCCS})
+
+SET(QGIS_SERVER_EX_SRCS qgis_mapserver.cpp)
+win32_icon(QGIS_SERVER_EX_SRCS)
+win32_version_info("QGIS Server (Development Server)" "qgis_mapserver" QGIS_SERVER_EX_SRCS)
+add_executable(qgis_mapserver ${QGIS_SERVER_EX_SRCS} ${QGIS_SERVER_TESTRCCS})
+
+if (QGISPOSTFIX)
+  set_target_properties(qgis_mapserv.fcgi PROPERTIES RUNTIME_OUTPUT_NAME qgis_mapserv${QGISPOSTFIX}.fcgi)
+  set_target_properties(qgis_mapserver PROPERTIES RUNTIME_OUTPUT_NAME qgis_mapserver${QGISPOSTFIX})
+endif()
+
+target_link_libraries(qgis_mapserv.fcgi qgis_server)
+target_link_libraries(qgis_mapserver qgis_server)
+
+# clang-tidy
+if(CLANG_TIDY_EXE)
+  set_target_properties(
+    qgis_mapserv.fcgi PROPERTIES
+    CXX_CLANG_TIDY "${DO_CLANG_TIDY}"
+  )
+endif()
+
+########################################################
+# Install
+
+install(CODE "message(\"Installing server...\")")
+install(TARGETS
+  qgis_mapserv.fcgi
+  DESTINATION ${QGIS_CGIBIN_DIR}
+)
+
+install(TARGETS
+  qgis_mapserver
+  DESTINATION ${QGIS_BIN_DIR}
+)
+
+install(FILES
+  DESTINATION ${QGIS_CGIBIN_DIR}
+)
+add_custom_target(qgis_server_full
+  DEPENDS qgis_mapserv.fcgi wms wfs wcs wfs3 wmts qgis_server landingpage
+)
