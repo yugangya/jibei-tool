@@ -7,14 +7,21 @@
 #include "qgsrasterblock.h"
 #include "qgsrasterdataprovider.h"
 #include "qgsrasterlayer.h"
+#include "qgsmaprendererparalleljob.h"
+#include "qgsmapsettings.h"
 
 #include <QColor>
+#include <QCoreApplication>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QImage>
+#include <QThread>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <future>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -209,6 +216,18 @@ namespace
     return keep;
   }
 
+  template <typename Function>
+  auto runOnnxWithUiEvents( Function &&function )
+  {
+    auto task = std::async( std::launch::async, std::forward<Function>( function ) );
+    while ( task.wait_for( std::chrono::milliseconds( 16 ) ) != std::future_status::ready )
+    {
+      QCoreApplication *application = QCoreApplication::instance();
+      if ( application && QThread::currentThread() == application->thread() )
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 5 );
+    }
+    return task.get();
+  }
   bool usableRasterBlock( const std::unique_ptr<QgsRasterBlock> &block, int width, int height )
   {
     return block && block->isValid() && !block->isEmpty() && block->width() == width && block->height() == height;
@@ -263,6 +282,59 @@ namespace
     const int bandCount = rasterLayer->bandCount();
     if ( bandCount <= 0 )
       return false;
+
+    // Prefer QGIS' own renderer for the inference tile. It applies the same
+    // contrast stretch and resampling that the operator sees on the map and
+    // avoids black previews for rasters whose raw provider values are not
+    // directly display-scaled (for example UInt16/Float32 GeoTIFFs).
+    {
+      QgsMapSettings settings;
+      settings.setLayers( { rasterLayer } );
+      settings.setDestinationCrs( rasterLayer->crs() );
+      settings.setExtent( tileExtent );
+      settings.setOutputSize( QSize( inputWidth, inputHeight ) );
+      settings.setBackgroundColor( Qt::black );
+      QgsMapRendererParallelJob renderJob( settings );
+      renderJob.start();
+      renderJob.waitForFinished();
+      const QImage rendered = renderJob.renderedImage().convertToFormat( QImage::Format_RGB888 );
+      if ( !rendered.isNull() && rendered.width() == inputWidth && rendered.height() == inputHeight )
+      {
+        int visiblePixels = 0;
+        const int pixelCount = inputWidth * inputHeight;
+        for ( int y = 0; y < inputHeight && visiblePixels <= pixelCount / 100; ++y )
+        {
+          const uchar *line = rendered.constScanLine( y );
+          for ( int x = 0; x < inputWidth; ++x )
+          {
+            if ( line[x * 3] > 2 || line[x * 3 + 1] > 2 || line[x * 3 + 2] > 2 )
+            {
+              ++visiblePixels;
+              if ( visiblePixels > pixelCount / 100 )
+                break;
+            }
+          }
+        }
+        if ( visiblePixels > pixelCount / 100 )
+        {
+          image = rendered;
+          const size_t channelSize = static_cast<size_t>( inputWidth ) * static_cast<size_t>( inputHeight );
+          inputTensor.assign( channelSize * 3, 0.0f );
+          for ( int y = 0; y < inputHeight; ++y )
+          {
+            const uchar *line = image.constScanLine( y );
+            for ( int x = 0; x < inputWidth; ++x )
+            {
+              const size_t pixel = static_cast<size_t>( y ) * static_cast<size_t>( inputWidth ) + static_cast<size_t>( x );
+              inputTensor[pixel] = line[x * 3] / 255.0f;
+              inputTensor[channelSize + pixel] = line[x * 3 + 1] / 255.0f;
+              inputTensor[channelSize * 2 + pixel] = line[x * 3 + 2] / 255.0f;
+            }
+          }
+          return true;
+        }
+      }
+    }
 
     image = QImage( inputWidth, inputHeight, QImage::Format_RGB888 );
     if ( image.isNull() )
@@ -598,14 +670,16 @@ QgsEcoOnnxInference::Result QgsEcoOnnxInference::run( QgsRasterLayer *rasterLaye
         // Moving an individual Session::Run call to a temporary worker while
         // manually pumping Qt events re-enters QGIS code during inference and
         // can leave the ONNX session/input lifetime in an unsafe state.
-        std::vector<Ort::Value> outputs = session.Run(
-          Ort::RunOptions { nullptr },
-          &inputNamePointer,
-          &inputValue,
-          1,
-          outputNamePointers.data(),
-          outputNamePointers.size()
-        );
+        std::vector<Ort::Value> outputs = runOnnxWithUiEvents( [&session, &inputNamePointer, &inputValue, &outputNamePointers] {
+          return session.Run(
+            Ort::RunOptions { nullptr },
+            &inputNamePointer,
+            &inputValue,
+            1,
+            outputNamePointers.data(),
+            outputNamePointers.size()
+          );
+        } );
         if ( outputs.empty() )
         {
           result.error = QStringLiteral( "模型未返回识别结果。" );

@@ -729,7 +729,32 @@ class EcoPhotoAnnotationView final : public QGraphicsView
 {
   public:
     explicit EcoPhotoAnnotationView( QWidget *parent = nullptr ) : QGraphicsView( parent ) { mScene = new QGraphicsScene( this ); setScene( mScene ); setRenderHint( QPainter::Antialiasing, true ); setRenderHint( QPainter::SmoothPixmapTransform, true ); setBackgroundBrush( QColor( QStringLiteral( "#111827" ) ) ); setFrameShape( QFrame::NoFrame ); setAlignment( Qt::AlignCenter ); setFocusPolicy( Qt::StrongFocus ); setMouseTracking( true ); viewport()->setMouseTracking( true ); setViewportUpdateMode( QGraphicsView::BoundingRectViewportUpdate ); setDragMode( QGraphicsView::ScrollHandDrag ); setTransformationAnchor( QGraphicsView::AnchorUnderMouse ); setResizeAnchor( QGraphicsView::AnchorViewCenter ); }
-    void setImage( const QImage &image, const QVector<QgsEcoPhotoWorkbench::Annotation> &annotations ) { clearDrawingPreview(); clearSmartPromptPoints(); clearEditHandles(); mScene->clear(); mImage = image; mAnnotations = annotations; mPixmapItem = nullptr; mAnnotationItems.clear(); mUserAdjustedView = false; if ( mImage.isNull() ) { mScene->setSceneRect( QRectF() ); return; } mPixmapItem = mScene->addPixmap( QPixmap::fromImage( mImage ) ); mPixmapItem->setZValue( 0.0 ); mScene->setSceneRect( mPixmapItem->boundingRect() ); rebuildAnnotationItems(); fitToImage(); }
+    void setImage( const QImage &image, const QVector<QgsEcoPhotoWorkbench::Annotation> &annotations )
+    {
+      clearDrawingPreview();
+      clearSmartPromptPoints();
+      clearEditHandles();
+      mScene->clear();
+      mImage = image;
+      mAnnotations = annotations;
+      mPixmapItem = nullptr;
+      mAnnotationItems.clear();
+      mUserAdjustedView = false;
+      if ( mImage.isNull() )
+      {
+        mScene->setSceneRect( QRectF() );
+        return;
+      }
+      // Keep scene coordinates in image pixels. A high-DPI QPixmap can
+      // otherwise offset edit handles from the mouse on Windows scaling.
+      QPixmap pixmap = QPixmap::fromImage( mImage );
+      pixmap.setDevicePixelRatio( 1.0 );
+      mPixmapItem = mScene->addPixmap( pixmap );
+      mPixmapItem->setZValue( 0.0 );
+      mScene->setSceneRect( mPixmapItem->boundingRect() );
+      rebuildAnnotationItems();
+      fitToImage();
+    }
     void setAnnotations( const QVector<QgsEcoPhotoWorkbench::Annotation> &annotations ) { clearEditHandles(); mAnnotations = annotations; rebuildAnnotationItems(); viewport()->update(); }
     void setDrawingEnabled( bool enabled, int classId, const QString &className ) { mDrawingEnabled = enabled; if ( enabled ) { mDeleteEnabled = false; mEditEnabled = false; clearEditHandles(); mDrawingClassId = classId; mDrawingClassName = className; } else clearDrawingPreview(); setDragMode( enabled ? QGraphicsView::NoDrag : QGraphicsView::ScrollHandDrag ); restoreInteractionCursor(); if ( enabled ) setFocus(); }
     void setDeleteEnabled( bool enabled ) { mDeleteEnabled = enabled; if ( enabled ) { mDrawingEnabled = false; mEditEnabled = false; clearDrawingPreview(); clearEditHandles(); setDragMode( QGraphicsView::NoDrag ); } else setDragMode( QGraphicsView::ScrollHandDrag ); restoreInteractionCursor(); if ( enabled ) setFocus(); }
@@ -774,10 +799,96 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       if ( mDrawingEnabled && event->button() == Qt::LeftButton && mPixmapItem ) { const QPointF scenePosition = clampedImagePoint( mapToScene( event->pos() ) ); if ( mPixmapItem->contains( scenePosition ) ) { mDrawingPoints.append( scenePosition ); mCurrentMousePoint = scenePosition; updateDrawingPreview( false ); event->accept(); return; } }
       QGraphicsView::mousePressEvent( event );
     }
-    void mouseMoveEvent( QMouseEvent *event ) override { if ( mSpaceDragging ) { const QPoint delta = event->pos() - mSpacePanStartPos; horizontalScrollBar()->setValue( mSpacePanStartH - delta.x() ); verticalScrollBar()->setValue( mSpacePanStartV - delta.y() ); event->accept(); return; } if ( mRightPanning ) { const QPoint delta = event->pos() - mRightPanStartPos; horizontalScrollBar()->setValue( mRightPanStartH - delta.x() ); verticalScrollBar()->setValue( mRightPanStartV - delta.y() ); event->accept(); return; } if ( mEditEnabled && mDraggingEditHandle && mEditingAnnotationIndex >= 0 && mPixmapItem ) { updateDraggedVertex( clampedImagePoint( mapToScene( event->pos() ) ) ); event->accept(); return; } if ( mDrawingEnabled && !mDrawingPoints.isEmpty() && mPixmapItem ) { mCurrentMousePoint = clampedImagePoint( mapToScene( event->pos() ) ); updateDrawingPreview( false ); event->accept(); return; } QGraphicsView::mouseMoveEvent( event ); }
+    void mouseMoveEvent( QMouseEvent *event ) override
+    {
+      if ( mSpaceDragging )
+      {
+        const QPoint delta = event->pos() - mSpacePanStartPos;
+        horizontalScrollBar()->setValue( mSpacePanStartH - delta.x() );
+        verticalScrollBar()->setValue( mSpacePanStartV - delta.y() );
+        event->accept();
+        return;
+      }
+      if ( mRightPanning )
+      {
+        const QPoint delta = event->pos() - mRightPanStartPos;
+        horizontalScrollBar()->setValue( mRightPanStartH - delta.x() );
+        verticalScrollBar()->setValue( mRightPanStartV - delta.y() );
+        event->accept();
+        return;
+      }
+      if ( mEditEnabled && mDraggingEditHandle && mEditingAnnotationIndex >= 0 && mPixmapItem )
+      {
+        updateDraggedVertex( clampedImagePoint( mapToScene( event->pos() ) ) );
+        event->accept();
+        return;
+      }
+      // 编辑模式下鼠标悬停在顶点上时改变光标
+      if ( mEditEnabled && !mDraggingEditHandle && mPixmapItem && mEditingAnnotationIndex >= 0 )
+      {
+        const QPointF scenePosition = clampedImagePoint( mapToScene( event->pos() ) );
+        const int handleIndex = nearestEditHandleIndex( scenePosition );
+        if ( handleIndex >= 0 )
+        {
+          setCursor( Qt::SizeAllCursor );
+          viewport()->setCursor( Qt::SizeAllCursor );
+        }
+        else
+        {
+          setCursor( Qt::ArrowCursor );
+          viewport()->setCursor( Qt::ArrowCursor );
+        }
+      }
+      if ( mDrawingEnabled && !mDrawingPoints.isEmpty() && mPixmapItem )
+      {
+        mCurrentMousePoint = clampedImagePoint( mapToScene( event->pos() ) );
+        updateDrawingPreview( false );
+        event->accept();
+        return;
+      }
+      QGraphicsView::mouseMoveEvent( event );
+    }
     void mouseReleaseEvent( QMouseEvent *event ) override { if ( mSpaceDragging && event->button() == Qt::LeftButton ) { mSpaceDragging = false; restoreInteractionCursor(); event->accept(); return; } if ( mRightPanning && event->button() == Qt::RightButton ) { mRightPanning = false; restoreInteractionCursor(); event->accept(); return; } if ( mEditEnabled && mDraggingEditHandle && event->button() == Qt::LeftButton ) { mDraggingEditHandle = false; commitEditGeometry(); event->accept(); return; } QGraphicsView::mouseReleaseEvent( event ); }
     void mouseDoubleClickEvent( QMouseEvent *event ) override { if ( mEditEnabled && event->button() == Qt::LeftButton && mPixmapItem && mEditingAnnotationIndex >= 0 && insertEditVertex( clampedImagePoint( mapToScene( event->pos() ) ) ) ) { commitEditGeometry(); event->accept(); return; } if ( mDrawingEnabled && event->button() == Qt::LeftButton && mPixmapItem ) { if ( mDrawingPoints.size() >= 3 && mAnnotationCallback ) { const QPolygonF normalized = normalizedPolygonFromScene( mDrawingPoints, mPixmapItem->boundingRect() ); const QRectF bounds = normalizedBoundingRect( normalized ); if ( normalized.size() >= 3 && bounds.width() >= 0.002 && bounds.height() >= 0.002 ) { mAnnotationCallback( mDrawingClassId, mDrawingClassName, normalized ); if ( mDrawingFinishedCallback ) mDrawingFinishedCallback(); } } clearDrawingPreview(); event->accept(); return; } QGraphicsView::mouseDoubleClickEvent( event ); }    void keyPressEvent( QKeyEvent *event ) override { if ( mSmartSegmentationEnabled && event->key() == Qt::Key_Space && !event->isAutoRepeat() ) { mSpacePanning = true; setCursor( Qt::OpenHandCursor ); viewport()->setCursor( Qt::OpenHandCursor ); event->accept(); return; } if ( mDrawingEnabled && event->matches( QKeySequence::Undo ) ) { if ( !mDrawingPoints.isEmpty() ) { mDrawingPoints.removeLast(); updateDrawingPreview( false ); } event->accept(); return; } if ( mDrawingEnabled && event->key() == Qt::Key_Escape ) { clearDrawingPreview(); event->accept(); return; } QGraphicsView::keyPressEvent( event ); }
     void keyReleaseEvent( QKeyEvent *event ) override { if ( mSmartSegmentationEnabled && event->key() == Qt::Key_Space && !event->isAutoRepeat() ) { mSpacePanning = false; if ( !mSpaceDragging ) restoreInteractionCursor(); event->accept(); return; } QGraphicsView::keyReleaseEvent( event ); }
+
+    // 修复窗口切换后光标卡顿的问题
+    void focusInEvent( QFocusEvent *event ) override
+    {
+      QGraphicsView::focusInEvent( event );
+      // 窗口获得焦点时重置光标状态
+      restoreInteractionCursor();
+    }
+
+    void focusOutEvent( QFocusEvent *event ) override
+    {
+      QGraphicsView::focusOutEvent( event );
+      // 窗口失去焦点时清理可能的拖动状态
+      if ( mSpaceDragging || mRightPanning || mDraggingEditHandle )
+      {
+        mSpaceDragging = false;
+        mRightPanning = false;
+        mDraggingEditHandle = false;
+        restoreInteractionCursor();
+      }
+    }
+
+    bool event( QEvent *e ) override
+    {
+      // 处理窗口激活/失活事件，防止光标异常
+      if ( e->type() == QEvent::WindowActivate )
+      {
+        restoreInteractionCursor();
+      }
+      else if ( e->type() == QEvent::WindowDeactivate )
+      {
+        // 窗口失活时重置所有临时状态
+        mSpaceDragging = false;
+        mRightPanning = false;
+        mDraggingEditHandle = false;
+      }
+      return QGraphicsView::event( e );
+    }
   private:
     qreal editHitTolerance() const { return std::max<qreal>( 6.0, QLineF( mapToScene( QPoint( 0, 0 ) ), mapToScene( QPoint( 10, 0 ) ) ).length() ); }
     int annotationIndexAt( const QPoint &viewPosition ) const
@@ -871,9 +982,10 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       }
       if ( mEditEnabled )
       {
-        const Qt::CursorShape cursor = mEditingAnnotationIndex >= 0 ? Qt::CrossCursor : Qt::PointingHandCursor;
-        setCursor( cursor );
-        viewport()->setCursor( cursor );
+        // 编辑模式下使用标准箭头光标，方便选择和拖动顶点
+        // 参考 QGIS 矢量编辑工具的光标样式
+        setCursor( Qt::ArrowCursor );
+        viewport()->setCursor( Qt::ArrowCursor );
         return;
       }
       setCursor( Qt::ArrowCursor );
@@ -2029,8 +2141,10 @@ void QgsEcoPhotoWorkbench::setPhotoSmartSegmentationEnabled( bool enabled )
   }
   if ( enabled && mEditAnnotationButton && mEditAnnotationButton->isChecked() ) { const QSignalBlocker blocker( mEditAnnotationButton ); mEditAnnotationButton->setChecked( false ); setAnnotationEditingEnabled( false ); }
   mPreview->setSmartSegmentationEnabled( enabled );
+  mPhotoSmartSegmentationButton->setText( enabled ? QStringLiteral( "\u7ED3\u675F\u667A\u80FD\u5206\u5272" ) : QStringLiteral( "\u667A\u80FD\u5206\u5272" ) );
+  mPhotoSmartSegmentationButton->setToolTip( enabled ? QStringLiteral( "\u7ED3\u675F\u5F53\u524D\u667A\u80FD\u5206\u5272\u5E76\u4FDD\u7559\u5DF2\u751F\u6210\u7684\u7ED3\u679C\u3002" ) : QStringLiteral( "\u5DE6\u952E\u6DFB\u52A0\u7EA2\u70B9\uFF0C\u53F3\u952E\u6DFB\u52A0\u84DD\u70B9\uFF0C\u6309\u7A7A\u683C\u53EF\u62D6\u52A8\u56FE\u7247\u3002" ) );
   if ( mStatusLabel )
-    mStatusLabel->setText( enabled ? tr( "智能分割已启用：左键红点，右键蓝点，按空格拖动图片。" ) : tr( "智能分割已关闭。" ) );
+    mStatusLabel->setText( enabled ? QStringLiteral( "\u667A\u80FD\u5206\u5272\u5DF2\u542F\u7528\uFF1A\u5DE6\u952E\u7EA2\u70B9\uFF0C\u53F3\u952E\u84DD\u70B9\uFF0C\u6309\u7A7A\u683C\u62D6\u52A8\u56FE\u7247\u3002" ) : QStringLiteral( "\u667A\u80FD\u5206\u5272\u5DF2\u5173\u95ED\u3002" ) );
 }
 
 void QgsEcoPhotoWorkbench::runPhotoSmartSegmentation( const QVector<QPointF> &normalizedPoints, const QVector<int> &promptLabels )

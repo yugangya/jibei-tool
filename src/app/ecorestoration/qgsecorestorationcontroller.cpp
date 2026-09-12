@@ -86,6 +86,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFutureWatcher>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -134,8 +135,11 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
+#include <QMetaObject>
 #include <QUndoStack>
 #include <QVBoxLayout>
+
+#include <QtConcurrentRun>
 
 #include <algorithm>
 #include <cmath>
@@ -1816,7 +1820,7 @@ namespace
     if ( QToolButton *previousButton = calendar->findChild<QToolButton *>( QStringLiteral( "qt_calendar_prevmonth" ) ) )
     {
       previousButton->setIcon( QIcon() );
-      previousButton->setText( QStringLiteral( "鈥筡" ) );
+      previousButton->setText( QStringLiteral( "←" ) );  // Unicode left arrow: ←
       previousButton->setToolButtonStyle( Qt::ToolButtonTextOnly );
       previousButton->setAutoRaise( true );
       previousButton->setFixedSize( 24, 24 );
@@ -1825,7 +1829,7 @@ namespace
     if ( QToolButton *nextButton = calendar->findChild<QToolButton *>( QStringLiteral( "qt_calendar_nextmonth" ) ) )
     {
       nextButton->setIcon( QIcon() );
-      nextButton->setText( QStringLiteral( "鈥篭" ) );
+      nextButton->setText( QStringLiteral( "→" ) );  // Unicode right arrow: →
       nextButton->setToolButtonStyle( Qt::ToolButtonTextOnly );
       nextButton->setAutoRaise( true );
       nextButton->setFixedSize( 24, 24 );
@@ -3874,7 +3878,7 @@ void QgsEcoRestorationController::createBusinessProject()
   QLineEdit *lineEdit = new QLineEdit( &dialog );
   lineEdit->setPlaceholderText( tr( "例如：白苏特高压重庆段" ) );
   QComboBox *voltageEdit = new QComboBox( &dialog );
-  voltageEdit->addItems( { tr( "卤800kV" ), tr( "卤500kV" ), tr( "1000kV" ), tr( "500kV" ), tr( "220kV" ), tr( "110kV" ), tr( "35kV" ), tr( "其他" ) } );
+  voltageEdit->addItems( { tr( "±800kV" ), tr( "±500kV" ), tr( "1000kV" ), tr( "500kV" ), tr( "220kV" ), tr( "110kV" ), tr( "35kV" ), tr( "其他" ) } );
   voltageEdit->setCurrentIndex( 0 );
   QLineEdit *provinceEdit = new QLineEdit( &dialog );
   provinceEdit->setPlaceholderText( tr( "省份或区域" ) );
@@ -5801,6 +5805,257 @@ void QgsEcoRestorationController::cancelExtentRecognition()
 }
 
 void QgsEcoRestorationController::runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId )
+{
+  runRecognitionAsync( targetExtents, targetLabels, towerLayerId );
+}
+
+void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId )
+{
+  const QString title = QStringLiteral( "\u5854\u57FA\u6270\u52A8\u8BC6\u522B" );
+  if ( mRecognitionRunning )
+  {
+    showMessage( title, QStringLiteral( "\u5F53\u524D\u8BC6\u522B\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C\uFF0C\u8BF7\u7A0D\u5019\u3002" ), true );
+    return;
+  }
+
+  QgsRasterLayer *rasterLayer = selectedRecognitionRasterLayer();
+  QgsVectorLayer *towerLayer = selectedRecognitionTowerLayer();
+  if ( !rasterLayer || !rasterLayer->isValid() || !rasterLayer->dataProvider() )
+  {
+    showMessage( title, QStringLiteral( "\u8BF7\u5148\u9009\u62E9\u6709\u6548\u7684 TIF \u5F71\u50CF\u3002" ), true );
+    return;
+  }
+  if ( targetExtents.isEmpty() )
+  {
+    showMessage( title, QStringLiteral( "\u6CA1\u6709\u53EF\u5904\u7406\u7684\u6746\u5854\u8303\u56F4\u3002" ), true );
+    return;
+  }
+
+  const QString modelPath = integratedTowerDisturbanceModelPath();
+  if ( !QFileInfo::exists( modelPath ) )
+  {
+    showMessage( title, QStringLiteral( "\u627E\u4E0D\u5230\u5854\u57FA\u6270\u52A8\u8BC6\u522B\u6A21\u578B\u3002" ), true );
+    return;
+  }
+
+  QVector<QgsRectangle> validExtents;
+  QStringList validLabels;
+  const QgsRectangle rasterExtent = rasterLayer->extent();
+  for ( int index = 0; index < targetExtents.size(); ++index )
+  {
+    const QgsRectangle extent = targetExtents.at( index ).intersect( rasterExtent );
+    if ( extent.isEmpty() || !extent.isFinite() )
+      continue;
+    validExtents.append( extent );
+    validLabels.append( index < targetLabels.size() ? targetLabels.at( index ) : QString() );
+  }
+  if ( validExtents.isEmpty() )
+  {
+    showMessage( title, QStringLiteral( "\u6746\u5854\u8303\u56F4\u4E0E\u5F53\u524D\u5F71\u50CF\u6CA1\u6709\u4EA4\u96C6\uFF0C\u8BF7\u68C0\u67E5 CRS \u548C\u671F\u6B21\u3002" ), true );
+    return;
+  }
+
+  QString recognitionPhaseId = layerPhaseIdForLayer( rasterLayer );
+  if ( recognitionPhaseId.isEmpty() )
+    recognitionPhaseId = currentPhaseId();
+  QgsVectorLayer *resultLayer = ensureDisturbanceResultLayer( recognitionPhaseId );
+  if ( !resultLayer )
+    return;
+  resultLayer->setCustomProperty( QStringLiteral( "eco/category" ), QStringLiteral( "recognition-result" ) );
+  resultLayer->setCustomProperty( QStringLiteral( "eco/resultType" ), QStringLiteral( "construction-disturbance" ) );
+  if ( !recognitionPhaseId.isEmpty() )
+    resultLayer->setCustomProperty( sPhaseIdProperty, recognitionPhaseId );
+  ensureRecognitionVisibilityField( resultLayer );
+  applyBusinessStyle( resultLayer );
+  attachRecognitionResultLayer( resultLayer );
+  if ( !towerLayerId.isEmpty() )
+    resultLayer->setCustomProperty( QStringLiteral( "eco/towerLayerId" ), towerLayerId );
+  mRecognitionResultLayerId = resultLayer->id();
+
+  QgsEcoOnnxInference::Parameters parameters;
+  parameters.modelPath = modelPath;
+  parameters.confidence = mConfidenceSpin ? mConfidenceSpin->value() : 0.35;
+  parameters.overlapPercent = 20;
+  parameters.maximumTiles = 5000;
+  parameters.targetExtents = validExtents;
+  parameters.targetLabels = validLabels;
+
+  std::shared_ptr<QgsRasterLayer> inferenceRasterLayer( rasterLayer->clone() );
+  if ( !inferenceRasterLayer || !inferenceRasterLayer->isValid() )
+  {
+    showMessage( title, QStringLiteral( "\u65E0\u6CD5\u521B\u5EFA\u8BC6\u522B\u5F71\u50CF\u526F\u672C\u3002" ), true );
+    return;
+  }
+
+  mRecognitionRunning = true;
+  mLayerImportInProgress = false;
+  if ( mRecognitionRunButton )
+    mRecognitionRunButton->setEnabled( false );
+  const int totalExtents = std::max( 1, static_cast<int>( validExtents.size() ) );
+  if ( mRecognitionScanPreview )
+    static_cast<EcoRecognitionScanPreview *>( mRecognitionScanPreview.data() )->beginTask( totalExtents );
+  setRecognitionProgress( 0, totalExtents );
+  if ( mRecognitionSelectionLabel )
+    mRecognitionSelectionLabel->setText( QStringLiteral( "\u6B63\u5728\u51C6\u5907\u8BC6\u522B\uFF0C\u754C\u9762\u4ECD\u53EF\u64CD\u4F5C\u2026" ) );
+
+  QPointer<QgsEcoRestorationController> controller( this );
+  QPointer<QgsRubberBand> progressBand;
+  if ( mApp && mApp->mapCanvas() )
+  {
+    progressBand = new QgsRubberBand( mApp->mapCanvas(), Qgis::GeometryType::Polygon );
+    progressBand->setStrokeColor( QColor( 255, 37, 37, 255 ) );
+    progressBand->setFillColor( QColor( 255, 37, 37, 34 ) );
+    progressBand->setSecondaryStrokeColor( QColor( 255, 255, 255, 210 ) );
+    progressBand->setWidth( 3.0 );
+    progressBand->setZValue( 930.0 );
+    progressBand->hide();
+  }
+
+  const auto progress = [controller, progressBand, validExtents, rasterCrs = rasterLayer->crs()]( int current, int total, const QString &message, const QString &sourceName, const QImage &previewImage ) -> bool {
+    if ( !controller )
+      return false;
+    const QImage image = previewImage;
+    const QString label = message.isEmpty() ? sourceName : message;
+    const QgsRectangle extent = validExtents.value( std::clamp( current - 1, 0, static_cast<int>( validExtents.size() ) - 1 ) );
+    QMetaObject::invokeMethod( controller.data(), [controller, progressBand, current, total, label, image, extent, rasterCrs] {
+      if ( !controller || !controller->mRecognitionRunning )
+        return;
+      controller->setRecognitionProgress( current, total );
+      if ( controller->mRecognitionSelectionLabel )
+        controller->mRecognitionSelectionLabel->setText( label );
+      if ( controller->mRecognitionScanPreview && !image.isNull() )
+        static_cast<EcoRecognitionScanPreview *>( controller->mRecognitionScanPreview.data() )->setCurrentImage( image, label, current, total );
+      if ( progressBand )
+      {
+        progressBand->reset( Qgis::GeometryType::Polygon );
+        progressBand->addGeometry( QgsGeometry::fromRect( extent ), rasterCrs, false );
+        progressBand->updatePosition();
+        progressBand->show();
+      }
+    }, Qt::QueuedConnection );
+    return true;
+  };
+
+  auto *watcher = new QFutureWatcher<QgsEcoOnnxInference::Result>( this );
+  const QString resultLayerId = resultLayer->id();
+  const QString rasterLayerId = rasterLayer->id();
+  connect( watcher, &QFutureWatcher<QgsEcoOnnxInference::Result>::finished, this, [this, watcher, controller, progressBand, resultLayerId, rasterLayerId, validExtents, towerLayerId, title] {
+    const QgsEcoOnnxInference::Result inference = watcher->result();
+    watcher->deleteLater();
+    auto cleanup = [this, progressBand]( bool success ) {
+      mRecognitionRunning = false;
+      if ( mRecognitionRunButton )
+        mRecognitionRunButton->setEnabled( QgsEcoOnnxInference::isRuntimeAvailable() );
+      if ( progressBand )
+      {
+        progressBand->reset( Qgis::GeometryType::Polygon );
+        progressBand->hide();
+        progressBand->deleteLater();
+      }
+      if ( mRecognitionScanPreview )
+        static_cast<EcoRecognitionScanPreview *>( mRecognitionScanPreview.data() )->finishTask( success );
+    };
+    if ( !controller || mProjectTransitionInProgress || !mRecognitionRunning )
+    {
+      cleanup( false );
+      return;
+    }
+    QgsVectorLayer *resultLayer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( resultLayerId ) );
+    QgsRasterLayer *rasterLayer = qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( rasterLayerId ) );
+    if ( !resultLayer || !rasterLayer )
+    {
+      cleanup( false );
+      showMessage( title, QStringLiteral( "\u8BC6\u522B\u671F\u95F4\u5F71\u50CF\u6216\u7ED3\u679C\u56FE\u5C42\u5DF2\u53D8\u66F4\uFF0C\u672C\u6B21\u7ED3\u679C\u5DF2\u5FFD\u7565\u3002" ), true );
+      return;
+    }
+    const int completedTotalExtents = std::max( 1, static_cast<int>( validExtents.size() ) );
+    setRecognitionProgress( std::max( 1, inference.processedTiles ), completedTotalExtents );
+    if ( !inference.success )
+    {
+      cleanup( false );
+      showMessage( title, inference.error.isEmpty() ? QStringLiteral( "\u8BC6\u522B\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u5F71\u50CF\u548C\u6A21\u578B\u3002" ) : inference.error, true );
+      return;
+    }
+    if ( inference.detections.isEmpty() )
+    {
+      syncBusinessProjectView( QList<QgsMapLayer *>() << resultLayer );
+      showRecognitionResultTable( resultLayer->id() );
+      refreshRecognitionResultTable();
+      cleanup( false );
+      showMessage( title, QStringLiteral( "\u5DF2\u5904\u7406 %1 \u4E2A\u8303\u56F4\uFF0C\u672A\u751F\u6210\u5019\u9009\u56FE\u6591\u3002\u8BF7\u964D\u4F4E\u7F6E\u4FE1\u5EA6\u6216\u68C0\u67E5\u5F71\u50CF\u4E0E\u6A21\u578B\u662F\u5426\u5339\u914D\u3002" ).arg( inference.processedTiles ), true );
+      return;
+    }
+    if ( !resultLayer->startEditing() )
+    {
+      cleanup( false );
+      showMessage( title, QStringLiteral( "\u7ED3\u679C\u56FE\u5C42\u65E0\u6CD5\u8FDB\u5165\u7F16\u8F91\u72B6\u6001\u3002" ), true );
+      return;
+    }
+    const int objectIdIndex = resultLayer->fields().indexFromName( QStringLiteral( "object_id" ) );
+    const int typeIndex = resultLayer->fields().indexFromName( QStringLiteral( "dist_type" ) );
+    const int confidenceIndex = resultLayer->fields().indexFromName( QStringLiteral( "confidence" ) );
+    const int verifyIndex = resultLayer->fields().indexFromName( QStringLiteral( "verify" ) );
+    const int sourceIndex = resultLayer->fields().indexFromName( QStringLiteral( "source" ) );
+    const int remarkIndex = resultLayer->fields().indexFromName( QStringLiteral( "remark" ) );
+    const int visibilityIndex = ensureRecognitionVisibilityField( resultLayer );
+    qlonglong nextObjectId = objectIdIndex >= 0 ? resultLayer->maximumValue( objectIdIndex ).toLongLong() + 1 : 1;
+    QgsCoordinateTransform transform( rasterLayer->crs(), resultLayer->crs(), QgsProject::instance()->transformContext() );
+    int addedCount = 0;
+    for ( const QgsEcoOnnxDetection &detection : inference.detections )
+    {
+      QgsGeometry geometry = detection.geometry;
+      if ( geometry.isNull() || geometry.isEmpty() || !geometry.boundingBox().isFinite() || geometry.boundingBox().isEmpty() )
+        continue;
+      try
+      {
+        if ( rasterLayer->crs() != resultLayer->crs() )
+          geometry.transform( transform );
+      }
+      catch ( const QgsCsException & )
+      {
+        continue;
+      }
+      QgsFeature feature( resultLayer->fields() );
+      feature.setGeometry( geometry );
+      if ( objectIdIndex >= 0 ) feature.setAttribute( objectIdIndex, nextObjectId++ );
+      if ( typeIndex >= 0 ) feature.setAttribute( typeIndex, QStringLiteral( "\u5854\u57FA\u65BD\u5DE5\u6270\u52A8" ) );
+      if ( confidenceIndex >= 0 ) feature.setAttribute( confidenceIndex, detection.confidence );
+      if ( verifyIndex >= 0 ) feature.setAttribute( verifyIndex, QStringLiteral( "\u5F85\u6838\u67E5" ) );
+      if ( sourceIndex >= 0 ) feature.setAttribute( sourceIndex, QStringLiteral( "\u667A\u80FD\u8BC6\u522B" ) );
+      if ( remarkIndex >= 0 ) feature.setAttribute( remarkIndex, detection.sourceName.isEmpty() ? QStringLiteral( "\u8BC6\u522B\u8303\u56F4 %1" ).arg( detection.tileIndex ) : detection.sourceName );
+      if ( visibilityIndex >= 0 ) feature.setAttribute( visibilityIndex, 1 );
+      if ( resultLayer->addFeature( feature ) )
+        ++addedCount;
+    }
+    if ( !resultLayer->commitChanges() )
+    {
+      const QString errors = resultLayer->commitErrors().join( QLatin1Char( '\n' ) );
+      resultLayer->rollBack();
+      cleanup( false );
+      showMessage( title, errors, true );
+      return;
+    }
+    resultLayer->updateExtents();
+    applyBusinessStyle( resultLayer );
+    attachRecognitionResultLayer( resultLayer );
+    resultLayer->triggerRepaint();
+    QgsProject::instance()->setDirty( true );
+    mApp->setActiveLayer( resultLayer );
+    syncBusinessProjectView( QList<QgsMapLayer *>() << resultLayer );
+    showRecognitionResultTable( resultLayer->id() );
+    if ( mRecognitionResultFilter && mRecognitionResultFilter->currentIndex() != 0 )
+      mRecognitionResultFilter->setCurrentIndex( 0 );
+    refreshRecognitionResultTable();
+    if ( mRecognitionSelectionLabel )
+      mRecognitionSelectionLabel->setText( QStringLiteral( "\u8BC6\u522B\u5B8C\u6210\uFF1A\u5199\u5165 %1 \u4E2A\u5019\u9009\u56FE\u6591\u3002" ).arg( addedCount ) );
+    cleanup( true );
+    showMessage( title, QStringLiteral( "\u5DF2\u5904\u7406 %1 \u4E2A\u8303\u56F4\uFF0C\u5199\u5165 %2 \u4E2A\u5019\u9009\u56FE\u6591\u3002" ).arg( inference.processedTiles ).arg( addedCount ) );
+  } );
+  watcher->setFuture( QtConcurrent::run( [inferenceRasterLayer, parameters, progress] {
+    return QgsEcoOnnxInference::run( inferenceRasterLayer.get(), parameters, progress );
+  } ) );
+}
+void QgsEcoRestorationController::runRecognitionLegacy( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId )
 {
   ecoImportTrace( QStringLiteral( "runRecognition entered targets=%1 labels=%2 towerLayerId=%3" )
                     .arg( targetExtents.size() )

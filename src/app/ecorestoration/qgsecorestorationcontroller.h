@@ -96,6 +96,8 @@ class QgsEcoRestorationController final : public QObject
     void startExtentRecognition();
     void cancelExtentRecognition();
     void runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString() );
+    void runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId );
+    void runRecognitionLegacy( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString() );
     QgsVectorLayer *createResultLayer( bool restoration = false, bool notify = true, const QString &phaseId = QString() );
     QgsVectorLayer *createSmartSegmentationLayer( const QString &layerName, const QgsCoordinateReferenceSystem &crs, bool notify = false );
     void startAddingPolygon();
