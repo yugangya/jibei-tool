@@ -1,4 +1,4 @@
-/***************************************************************************
+***************************************************************************
   QgsAttributeTableDialog.cpp
   -------------------
          date                 : Feb 2009
@@ -441,6 +441,18 @@ QgsAttributeTableDialog::QgsAttributeTableDialog(
     {
       initialView = static_cast<int>( configuredView );
     }
+
+    // Jianghe disturbance recognition results are edited as a dataset. Always
+    // open their attribute table in row/column mode, regardless of QGIS's
+    // remembered global form/table preference. Other layers keep the normal
+    // QGIS behavior.
+    const bool isEcoDisturbanceResult = mLayer
+      && ( mLayer->customProperty( QStringLiteral( "eco/resultType" ) ).toString() == QLatin1String( "construction-disturbance" )
+           || mLayer->customProperty( QStringLiteral( "eco/category" ) ).toString() == QLatin1String( "recognition-result" )
+           || mLayer->name().startsWith( QStringLiteral( "施工扰动识别成果" ) ) );
+    if ( isEcoDisturbanceResult )
+      initialView = QgsDualView::AttributeTable;
+
     mMainView->setView( static_cast<QgsDualView::ViewMode>( initialView ) );
     mMainViewButtonGroup->button( initialView )->setChecked( true );
 
@@ -483,7 +495,7 @@ void QgsAttributeTableDialog::updateTitle()
   {
     return;
   }
-  const QString title = tr( " %1 — Features Total: %L2, Filtered: %L3, Selected: %L4" )
+  const QString title = tr( "%1 - 要素总计：%L2，筛选：%L3，选择：%L4" )
                           .arg( mLayer->name() )
                           .arg( std::max( static_cast<long long>( mMainView->featureCount() ), mLayer->featureCount() ) ) // layer count may be estimated, so use larger of the two
                           .arg( mMainView->filteredFeatureCount() )

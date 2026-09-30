@@ -25,6 +25,7 @@ class QProgressBar;
 class QPushButton;
 class QVariantAnimation;
 class QTabWidget;
+class QCheckBox;
 
 class EcoPhotoAnnotationView;
 
@@ -89,6 +90,7 @@ class QgsEcoPhotoWorkbench final : public QWidget
     void updateAnnotation( int annotationIndex, const QPolygonF &normalizedPolygon );
     void deleteAnnotationAt( int annotationIndex );
     void addAnnotation( int classId, const QString &className, const QPolygonF &normalizedPolygon, const QString &source = QStringLiteral( "manual" ) );
+    void updateSelectAllCheckBoxState();
     void exportOriginalPhotos();
     void createFusedPhotos();
     void exportFusedPhotos();
@@ -131,6 +133,7 @@ class QgsEcoPhotoWorkbench final : public QWidget
     QPushButton *mExportOriginalButton = nullptr;
     QPushButton *mExportFusedButton = nullptr;
     QPushButton *mExportYoloButton = nullptr;
+    QCheckBox *mSelectAllCheckBox = nullptr;
     bool mDeleteMode = false;
     QSet<QString> mCheckedPhotoPaths;
     QVector<PhotoRecord> mPhotos;

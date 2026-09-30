@@ -765,6 +765,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     void setDrawingFinishedCallback( std::function<void()> callback ) { mDrawingFinishedCallback = std::move( callback ); }
     void setSmartSegmentationCallback( std::function<void( const QVector<QPointF> &, const QVector<int> & )> callback ) { mSmartSegmentationCallback = std::move( callback ); }
     void setSmartSegmentationEnabled( bool enabled ) { mSmartSegmentationEnabled = enabled; mSpacePanning = false; mSpaceDragging = false; if ( !enabled ) clearSmartPromptPoints(); if ( enabled ) { mDrawingEnabled = false; mDeleteEnabled = false; mEditEnabled = false; clearDrawingPreview(); clearEditHandles(); setDragMode( QGraphicsView::NoDrag ); } else setDragMode( QGraphicsView::ScrollHandDrag ); restoreInteractionCursor(); if ( enabled ) setFocus(); }
+    void setSegmentationInProgress( bool inProgress ) { mSegmentationInProgress = inProgress; }
     bool hasUnfinishedDrawing() const { return !mDrawingPoints.isEmpty(); }
     void discardCurrentDrawing() { clearDrawingPreview(); }
     bool finishCurrentDrawing() { if ( !mPixmapItem || mDrawingPoints.size() < 3 || !mAnnotationCallback ) return false; const QPolygonF normalized = normalizedPolygonFromScene( mDrawingPoints, mPixmapItem->boundingRect() ); const QRectF bounds = normalizedBoundingRect( normalized ); if ( normalized.size() < 3 || bounds.width() < 0.002 || bounds.height() < 0.002 ) return false; mAnnotationCallback( mDrawingClassId, mDrawingClassName, normalized ); clearDrawingPreview(); if ( mDrawingFinishedCallback ) mDrawingFinishedCallback(); return true; }
@@ -795,7 +796,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       }
       if ( mDeleteEnabled && event->button() == Qt::LeftButton ) { QGraphicsItem *rawItem = itemAt( event->pos() ); while ( rawItem && !dynamic_cast<PhotoPolygonItem *>( rawItem ) ) rawItem = rawItem->parentItem(); if ( auto *polygonItem = dynamic_cast<PhotoPolygonItem *>( rawItem ) ) { if ( mDeleteCallback ) mDeleteCallback( polygonItem->data( 0 ).toInt() ); event->accept(); return; } }
       if ( mDrawingEnabled && event->button() == Qt::RightButton && mPixmapItem ) { mRightPanning = true; mRightPanStartPos = event->pos(); mRightPanStartH = horizontalScrollBar()->value(); mRightPanStartV = verticalScrollBar()->value(); setCursor( Qt::ClosedHandCursor ); viewport()->setCursor( Qt::ClosedHandCursor ); event->accept(); return; }
-      if ( mSmartSegmentationEnabled && ( event->button() == Qt::LeftButton || event->button() == Qt::RightButton ) && mPixmapItem ) { const QPointF scenePosition = clampedImagePoint( mapToScene( event->pos() ) ); if ( mPixmapItem->contains( scenePosition ) && mSmartSegmentationCallback ) { const QRectF rect = mPixmapItem->boundingRect(); mSmartPromptPoints.append( QPointF( ( scenePosition.x() - rect.left() ) / rect.width(), ( scenePosition.y() - rect.top() ) / rect.height() ) ); const int label = event->button() == Qt::RightButton ? 0 : 1; mSmartPromptLabels.append( label ); auto *marker = new DrawingPointItem( scenePosition, 4.6, label == 1 ? QColor( QStringLiteral( "#ef4444" ) ) : QColor( QStringLiteral( "#38bdf8" ) ), true ); mScene->addItem( marker ); mSmartPromptItems.append( marker ); mSmartSegmentationCallback( mSmartPromptPoints, mSmartPromptLabels ); event->accept(); return; } }
+      if ( mSmartSegmentationEnabled && ( event->button() == Qt::LeftButton || event->button() == Qt::RightButton ) && mPixmapItem ) { const QPointF scenePosition = clampedImagePoint( mapToScene( event->pos() ) ); if ( mPixmapItem->contains( scenePosition ) && mSmartSegmentationCallback && !mSegmentationInProgress ) { const QRectF rect = mPixmapItem->boundingRect(); mSmartPromptPoints.append( QPointF( ( scenePosition.x() - rect.left() ) / rect.width(), ( scenePosition.y() - rect.top() ) / rect.height() ) ); const int label = event->button() == Qt::RightButton ? 0 : 1; mSmartPromptLabels.append( label ); auto *marker = new DrawingPointItem( scenePosition, 4.6, label == 1 ? QColor( QStringLiteral( "#ef4444" ) ) : QColor( QStringLiteral( "#38bdf8" ) ), true ); mScene->addItem( marker ); mSmartPromptItems.append( marker ); mSegmentationInProgress = true; mSmartSegmentationCallback( mSmartPromptPoints, mSmartPromptLabels ); event->accept(); return; } }
       if ( mDrawingEnabled && event->button() == Qt::LeftButton && mPixmapItem ) { const QPointF scenePosition = clampedImagePoint( mapToScene( event->pos() ) ); if ( mPixmapItem->contains( scenePosition ) ) { mDrawingPoints.append( scenePosition ); mCurrentMousePoint = scenePosition; updateDrawingPreview( false ); event->accept(); return; } }
       QGraphicsView::mousePressEvent( event );
     }
@@ -954,11 +955,12 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       if ( insertIndex < 0 ) return false;
       mEditPolygon.insert( insertIndex, scenePosition ); refreshEditGeometry(); return true;
     }
-    bool removeEditVertex( int vertexIndex ) { if ( mEditingAnnotationIndex < 0 || mEditPolygon.size() <= 3 || vertexIndex < 0 || vertexIndex >= mEditPolygon.size() ) return false; mEditPolygon.removeAt( vertexIndex ); refreshEditGeometry(); commitEditGeometry(); return true; }  private:
+    bool removeEditVertex( int vertexIndex ) { if ( mEditingAnnotationIndex < 0 || mEditPolygon.size() <= 3 || vertexIndex < 0 || vertexIndex >= mEditPolygon.size() ) return false; mEditPolygon.removeAt( vertexIndex ); refreshEditGeometry(); commitEditGeometry(); return true; }
+  private:
     void fitToImage() { if ( !mPixmapItem ) return; resetTransform(); fitInView( mPixmapItem, Qt::KeepAspectRatio ); centerOn( mPixmapItem ); mUserAdjustedView = false; }
     void clearAnnotationItems() { for ( QGraphicsPolygonItem *item : std::as_const( mAnnotationItems ) ) { if ( item && item->scene() ) item->scene()->removeItem( item ); delete item; } mAnnotationItems.clear(); }
     void rebuildAnnotationItems() { if ( !mPixmapItem ) return; clearAnnotationItems(); const QRectF imageRect = mPixmapItem->boundingRect(); for ( int i = 0; i < mAnnotations.size(); ++i ) { const auto &annotation = mAnnotations.at( i ); const QPolygonF polygon = scenePolygonFromNormalized( annotation.normalizedPolygon, imageRect ); if ( polygon.size() < 3 ) continue; auto *item = new PhotoPolygonItem( polygon, annotationColor( annotation.classId ) ); item->setData( 0, i ); item->setToolTip( annotation.className ); mScene->addItem( item ); mAnnotationItems.insert( i, item ); } }
-    void clearSmartPromptPoints() { for ( QGraphicsItem *item : std::as_const( mSmartPromptItems ) ) { if ( item && item->scene() ) item->scene()->removeItem( item ); delete item; } mSmartPromptItems.clear(); mSmartPromptPoints.clear(); mSmartPromptLabels.clear(); }
+    void clearSmartPromptPoints() { for ( QGraphicsItem *item : std::as_const( mSmartPromptItems ) ) { if ( item && item->scene() ) item->scene()->removeItem( item ); delete item; } mSmartPromptItems.clear(); mSmartPromptPoints.clear(); mSmartPromptLabels.clear(); mSegmentationInProgress = false; }
     void restoreInteractionCursor()
     {
       if ( mSmartSegmentationEnabled )
@@ -993,7 +995,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     }    QPointF clampedImagePoint( const QPointF &scenePoint ) const { if ( !mPixmapItem ) return scenePoint; const QRectF rect = mPixmapItem->boundingRect(); return QPointF( std::clamp( scenePoint.x(), rect.left(), rect.right() ), std::clamp( scenePoint.y(), rect.top(), rect.bottom() ) ); }
     void clearDrawingPreview() { mDrawingPoints.clear(); mCurrentMousePoint = QPointF(); if ( mDrawGlowItem ) { mScene->removeItem( mDrawGlowItem ); delete mDrawGlowItem; mDrawGlowItem = nullptr; } if ( mDrawItem ) { mScene->removeItem( mDrawItem ); delete mDrawItem; mDrawItem = nullptr; } }
     void updateDrawingPreview( bool closePolygon ) { if ( !mScene ) return; if ( mDrawGlowItem ) { mScene->removeItem( mDrawGlowItem ); delete mDrawGlowItem; mDrawGlowItem = nullptr; } if ( mDrawItem ) { mScene->removeItem( mDrawItem ); delete mDrawItem; mDrawItem = nullptr; } if ( mDrawingPoints.isEmpty() ) return; QPolygonF points = mDrawingPoints; if ( !closePolygon && mCurrentMousePoint != mDrawingPoints.constLast() ) points.append( mCurrentMousePoint ); QPainterPath path; path.moveTo( points.first() ); for ( int i = 1; i < points.size(); ++i ) path.lineTo( points.at( i ) ); if ( points.size() >= 3 ) path.closeSubpath(); QColor fill = annotationColor( mDrawingClassId ); fill.setAlpha( points.size() >= 3 ? 78 : 24 ); QPen glowPen( annotationColor( mDrawingClassId ), points.size() >= 3 ? 7.0 : 5.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin ); glowPen.setCosmetic( true ); mDrawGlowItem = mScene->addPath( path, glowPen, Qt::NoBrush ); mDrawGlowItem->setZValue( 19.5 ); QPen pen( annotationColor( mDrawingClassId ).lighter( 145 ), points.size() >= 3 ? 2.2 : 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin ); pen.setCosmetic( true ); mDrawItem = mScene->addPath( path, pen, QBrush( fill ) ); mDrawItem->setZValue( 20.0 ); for ( int i = 0; i < mDrawingPoints.size(); ++i ) new DrawingPointItem( mDrawingPoints.at( i ), 3.7, annotationColor( mDrawingClassId ), i == mDrawingPoints.size() - 1, mDrawItem ); if ( !closePolygon && mCurrentMousePoint != mDrawingPoints.constLast() ) new DrawingPointItem( mCurrentMousePoint, 4.2, annotationColor( mDrawingClassId ), true, mDrawItem ); }
-    QGraphicsScene *mScene = nullptr; QGraphicsPixmapItem *mPixmapItem = nullptr; QHash<int, QGraphicsPolygonItem *> mAnnotationItems; QVector<QGraphicsEllipseItem *> mEditHandles; QPolygonF mEditPolygon; QVector<QGraphicsItem *> mSmartPromptItems; QVector<QPointF> mSmartPromptPoints; QVector<int> mSmartPromptLabels; QImage mImage; QVector<QgsEcoPhotoWorkbench::Annotation> mAnnotations; bool mDrawingEnabled = false; bool mEditEnabled = false; bool mUserAdjustedView = false; int mDrawingClassId = 0; QString mDrawingClassName; QPolygonF mDrawingPoints; QPointF mCurrentMousePoint; QGraphicsPathItem *mDrawGlowItem = nullptr; QGraphicsPathItem *mDrawItem = nullptr; int mEditingAnnotationIndex = -1; int mDraggedEditHandleIndex = -1; bool mDraggingEditHandle = false; bool mDeleteEnabled = false; bool mSmartSegmentationEnabled = false; bool mRightPanning = false; QPoint mRightPanStartPos; int mRightPanStartH = 0; int mRightPanStartV = 0; bool mSpacePanning = false; bool mSpaceDragging = false; QPoint mSpacePanStartPos; int mSpacePanStartH = 0; int mSpacePanStartV = 0; std::function<void( int, const QString &, const QPolygonF & )> mAnnotationCallback; std::function<void( int )> mDeleteCallback; std::function<void()> mDrawingFinishedCallback; std::function<void( const QVector<QPointF> &, const QVector<int> & )> mSmartSegmentationCallback; std::function<void( int, const QPolygonF & )> mAnnotationEditCallback;
+    QGraphicsScene *mScene = nullptr; QGraphicsPixmapItem *mPixmapItem = nullptr; QHash<int, QGraphicsPolygonItem *> mAnnotationItems; QVector<QGraphicsEllipseItem *> mEditHandles; QPolygonF mEditPolygon; QVector<QGraphicsItem *> mSmartPromptItems; QVector<QPointF> mSmartPromptPoints; QVector<int> mSmartPromptLabels; QImage mImage; QVector<QgsEcoPhotoWorkbench::Annotation> mAnnotations; bool mDrawingEnabled = false; bool mEditEnabled = false; bool mUserAdjustedView = false; int mDrawingClassId = 0; QString mDrawingClassName; QPolygonF mDrawingPoints; QPointF mCurrentMousePoint; QGraphicsPathItem *mDrawGlowItem = nullptr; QGraphicsPathItem *mDrawItem = nullptr; int mEditingAnnotationIndex = -1; int mDraggedEditHandleIndex = -1; bool mDraggingEditHandle = false; bool mDeleteEnabled = false; bool mSmartSegmentationEnabled = false; bool mSegmentationInProgress = false; bool mRightPanning = false; QPoint mRightPanStartPos; int mRightPanStartH = 0; int mRightPanStartV = 0; bool mSpacePanning = false; bool mSpaceDragging = false; QPoint mSpacePanStartPos; int mSpacePanStartH = 0; int mSpacePanStartV = 0; std::function<void( int, const QString &, const QPolygonF & )> mAnnotationCallback; std::function<void( int )> mDeleteCallback; std::function<void()> mDrawingFinishedCallback; std::function<void( const QVector<QPointF> &, const QVector<int> & )> mSmartSegmentationCallback; std::function<void( int, const QPolygonF & )> mAnnotationEditCallback;
 };QgsEcoPhotoWorkbench::QgsEcoPhotoWorkbench( MessageCallback messageCallback, QWidget *parent )
   : QWidget( parent )
   , mMessageCallback( std::move( messageCallback ) )
@@ -1232,6 +1234,60 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   QWidget *originalTab = new QWidget( this );
   QVBoxLayout *originalLayout = new QVBoxLayout( originalTab );
   originalLayout->setContentsMargins( 0, 0, 0, 0 );
+  originalLayout->setSpacing( 0 );
+
+  // 添加照片列表顶部控制栏
+  QFrame *photoListHeader = new QFrame( originalTab );
+  photoListHeader->setStyleSheet( QStringLiteral( "background:#1a1f2b; border:none; border-bottom:1px solid #2d3d4f;" ) );
+  QHBoxLayout *headerLayout = new QHBoxLayout( photoListHeader );
+  headerLayout->setContentsMargins( 12, 6, 12, 6 );
+  headerLayout->setSpacing( 8 );
+
+  mSelectAllCheckBox = new PhotoSelectionCheckBox( photoListHeader );
+  mSelectAllCheckBox->setToolTip( tr( "全选/取消全选照片" ) );
+  mSelectAllCheckBox->setTristate( true );
+  mSelectAllCheckBox->setCheckState( Qt::Unchecked );
+  connect( mSelectAllCheckBox, &QCheckBox::clicked, this, [this] {
+    if ( !mPhotoList )
+      return;
+    const bool checked = mSelectAllCheckBox->checkState() != Qt::Unchecked;
+    for ( int row = 0; row < mPhotoList->count(); ++row )
+    {
+      QListWidgetItem *item = mPhotoList->item( row );
+      auto *entry = item ? dynamic_cast<PhotoListEntryWidget *>( mPhotoList->itemWidget( item ) ) : nullptr;
+      if ( entry )
+        entry->setChecked( checked );
+    }
+  } );
+
+  QLabel *selectLabel = new QLabel( tr( "全选" ), photoListHeader );
+  selectLabel->setStyleSheet( QStringLiteral( "color:#9aa8b8; font-size:11px; font-weight:600;" ) );
+
+  QPushButton *invertSelectionButton = new QPushButton( tr( "反选" ), photoListHeader );
+  invertSelectionButton->setStyleSheet( QStringLiteral(
+    "QPushButton { min-height:22px; color:#b8c5d1; background:#242b38; border:1px solid #3a4556; border-radius:3px; padding:2px 10px; font-size:11px; }"
+    "QPushButton:hover { background:#2d3543; border-color:#4a5566; color:#dce8f5; }"
+  ) );
+  invertSelectionButton->setToolTip( tr( "反选所有照片的勾选状态" ) );
+  connect( invertSelectionButton, &QPushButton::clicked, this, [this] {
+    if ( !mPhotoList )
+      return;
+    for ( int row = 0; row < mPhotoList->count(); ++row )
+    {
+      QListWidgetItem *item = mPhotoList->item( row );
+      auto *entry = item ? dynamic_cast<PhotoListEntryWidget *>( mPhotoList->itemWidget( item ) ) : nullptr;
+      if ( entry )
+        entry->setChecked( !entry->isChecked() );
+    }
+    updateSelectAllCheckBoxState();
+  } );
+
+  headerLayout->addWidget( mSelectAllCheckBox );
+  headerLayout->addWidget( selectLabel );
+  headerLayout->addWidget( invertSelectionButton );
+  headerLayout->addStretch( 1 );
+
+  originalLayout->addWidget( photoListHeader );
   originalLayout->addWidget( splitter, 1 );
 
   QWidget *fusedTab = new QWidget( this );
@@ -1650,6 +1706,7 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
         mCheckedPhotoPaths.insert( key );
       else
         mCheckedPhotoPaths.remove( key );
+      updateSelectAllCheckBoxState();
     } );
     entry->setChecked( mCheckedPhotoPaths.contains( photoSelectionKey( mPhotos.at( index ) ) ) );
     mPhotoList->setItemWidget( item, entry );
@@ -1658,6 +1715,7 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
   if ( !mPhotos.isEmpty() )
     mPhotoList->setCurrentRow( std::clamp( previousIndex, 0, static_cast<int>( mPhotos.size() ) - 1 ) );
   syncListEntrySelectionState( mPhotoList );
+  updateSelectAllCheckBoxState();
 
   if ( mPhotos.size() > 60 )
     scheduleThumbnailLoading();
@@ -1758,6 +1816,7 @@ void QgsEcoPhotoWorkbench::updatePhotoListItem( int index, bool loadThumbnail )
         mCheckedPhotoPaths.insert( key );
       else
         mCheckedPhotoPaths.remove( key );
+      updateSelectAllCheckBoxState();
     } );
     entry->onClicked( [this, index] {
       if ( mPhotoList && index >= 0 && index < mPhotoList->count() )
@@ -1894,6 +1953,36 @@ void QgsEcoPhotoWorkbench::updateSummary()
 
   mSummaryLabel->setText( photoSummaryHtml( mPhaseName, mPhotos.size(), annotationCount, autoCount, manualCount, fusionCount ) );
 }
+
+void QgsEcoPhotoWorkbench::updateSelectAllCheckBoxState()
+{
+  if ( !mSelectAllCheckBox || !mPhotoList )
+    return;
+
+  int checkedCount = 0;
+  int totalCount = 0;
+
+  for ( int row = 0; row < mPhotoList->count(); ++row )
+  {
+    QListWidgetItem *item = mPhotoList->item( row );
+    auto *entry = item ? dynamic_cast<PhotoListEntryWidget *>( mPhotoList->itemWidget( item ) ) : nullptr;
+    if ( entry )
+    {
+      totalCount++;
+      if ( entry->isChecked() )
+        checkedCount++;
+    }
+  }
+
+  const QSignalBlocker blocker( mSelectAllCheckBox );
+  if ( checkedCount == 0 )
+    mSelectAllCheckBox->setCheckState( Qt::Unchecked );
+  else if ( checkedCount == totalCount )
+    mSelectAllCheckBox->setCheckState( Qt::Checked );
+  else
+    mSelectAllCheckBox->setCheckState( Qt::PartiallyChecked );
+}
+
 void QgsEcoPhotoWorkbench::setBusy( bool busy, const QString &status )
 {
   mBusy = busy;
@@ -2179,6 +2268,9 @@ void QgsEcoPhotoWorkbench::runPhotoSmartSegmentation( const QVector<QPointF> &no
   connect( watcher, &QFutureWatcher<QgsEcoSam2OnnxInference::Result>::finished, this, [this, watcher, generation, photoIndex, image] {
     const QgsEcoSam2OnnxInference::Result result = watcher->result();
     watcher->deleteLater();
+    // 重置分割进行中标志，允许下次点击
+    if ( mPreview )
+      mPreview->setSegmentationInProgress( false );
     if ( generation != mContextGeneration )
     {
        setBusy( false, tr( "智能分割结果已过期，已忽略。" ) );
@@ -2935,7 +3027,3 @@ void QgsEcoPhotoWorkbench::exportYoloSamples()
     return result;
   } ) );
 }
-
-
-
-

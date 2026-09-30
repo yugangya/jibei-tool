@@ -1,4 +1,4 @@
-/***************************************************************************
+***************************************************************************
   qgsecorestorationcontroller.cpp
  ***************************************************************************/
 
@@ -10,6 +10,7 @@
 #include "qgisapp.h"
 
 #include "qgsapplication.h"
+#include "qgsattributetableconfig.h"
 #include "qgscoordinatetransform.h"
 #include "qgsdefaultvalue.h"
 #include "qgsdistancearea.h"
@@ -1863,6 +1864,14 @@ namespace
       layer->setFieldAlias( index, QObject::tr( "图斑显示" ) );
       layer->setDefaultValueDefinition( index, QgsDefaultValue( QStringLiteral( "1" ) ) );
       layer->setEditorWidgetSetup( index, QgsEditorWidgetSetup( QStringLiteral( "Hidden" ), QVariantMap() ) );
+      QgsAttributeTableConfig config = layer->attributeTableConfig();
+      QVector<QgsAttributeTableConfig::ColumnConfig> columns = config.columns();
+      if ( index < columns.size() )
+      {
+        columns[index].hidden = true;
+        config.setColumns( columns );
+        layer->setAttributeTableConfig( config );
+      }
     }
     return index;
   }
@@ -3112,6 +3121,7 @@ QgsEcoRestorationController::QgsEcoRestorationController( QgisApp *app )
   createWelcomeOverlay();
   if ( mApp->layerTreeView() )
   {
+    mApp->layerTreeView()->layerTreeModel()->setFlag( QgsLayerTreeModel::ActionHierarchical );
     mApp->layerTreeView()->installEventFilter( this );
     mApp->layerTreeView()->viewport()->installEventFilter( this );
     mApp->layerTreeView()->setDragDropMode( QAbstractItemView::InternalMove );
@@ -4896,7 +4906,7 @@ void QgsEcoRestorationController::startDrawingOnActiveLayer( const QString &geom
     showMessage( tr( "绘制%1矢量" ).arg( geometryName ), tr( "请先在左侧工程图层中选择一个可编辑?1图层。" ).arg( geometryName ), true );
     return;
   }
-  if ( !layer->isEditable() && !mApp->toggleEditing( layer ) )
+  if ( !layer->isEditable() && !layer->startEditing() )
   {
     showMessage( tr( "绘制%1矢量" ).arg( geometryName ), tr( "当前图层无法进入编辑状态，请检查数据写入权限。" ), true );
     return;
@@ -6832,7 +6842,7 @@ bool QgsEcoRestorationController::ensureEditableResultLayer( QgsVectorLayer *lay
     return false;
   }
   mApp->setActiveLayer( layer );
-  if ( !layer->isEditable() && !mApp->toggleEditing( layer ) )
+  if ( !layer->isEditable() && !layer->startEditing() )
   {
     showMessage( tr( "修复成果" ), tr( "该图层无法进入编辑状态，请检查文件写入权限。" ), true );
     return false;
@@ -10728,8 +10738,7 @@ void QgsEcoRestorationController::editRecognitionResultForRow( int row )
   if ( !towerItem || !resultLayer )
     return;
   const QString towerLabel = towerItem->text();
-  if ( !focusRecognitionResultRow( row, 1250.0 ) )
-    return;
+  focusRecognitionResultRow( row, 1250.0 );
   if ( !ensureEditableResultLayer( resultLayer ) )
     return;
   if ( !mRecognitionEditingTowerLabel.isEmpty() && mRecognitionEditingTowerLabel != towerLabel )
@@ -10793,8 +10802,7 @@ void QgsEcoRestorationController::addRecognitionResultForRow( int row )
   if ( !towerItem || !resultLayer )
     return;
   const QString towerLabel = towerItem->text();
-  if ( !focusRecognitionResultRow( row, 1250.0 ) )
-    return;
+  focusRecognitionResultRow( row, 1250.0 );
   if ( !ensureEditableResultLayer( resultLayer ) )
     return;
   if ( !mRecognitionEditingTowerLabel.isEmpty() && mRecognitionEditingTowerLabel != towerLabel )

@@ -469,7 +469,7 @@ QString QgsPythonUtilsImpl::runStringUnsafe( const QString &command, bool single
   gstate = PyGILState_Ensure();
   QString ret;
 
-  // TODO: convert special characters from unicode strings u"闂? to \uXXXX
+  // TODO: convert non-ASCII characters from Unicode strings to \uXXXX
   // so that they're not mangled to utf-8
   // (non-unicode strings can be mangled)
   PyObject *obj = PyRun_String( command.toUtf8().constData(), single ? Py_single_input : Py_file_input, mMainDict, mMainDict );

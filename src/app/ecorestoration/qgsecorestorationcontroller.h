@@ -1,4 +1,4 @@
-/***************************************************************************
+***************************************************************************
   qgsecorestorationcontroller.h
   --------------------------------------
   Native environmental restoration workflow for the desktop application.

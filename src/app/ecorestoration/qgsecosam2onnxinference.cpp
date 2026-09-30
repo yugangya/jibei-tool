@@ -314,7 +314,7 @@ namespace
     }
     catch ( const Ort::Exception &exception )
     {
-      return QStringLiteral( "闁哄懘缂氶崗姗€宕氶崱妤€顥忔俊顖椻偓宕団偓鐑藉礉閻樼儤绁板鎯扮簿鐟欙箓鏁?1" ).arg( QString::fromUtf8( exception.what() ) );
+      return QStringLiteral( "SAM2 模型推理失败：%1" ).arg( QString::fromUtf8( exception.what() ) );
     }
   }
 
