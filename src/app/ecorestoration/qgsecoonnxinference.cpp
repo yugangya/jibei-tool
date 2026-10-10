@@ -23,6 +23,8 @@
 #include <chrono>
 #include <future>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -35,6 +37,40 @@
 
 namespace
 {
+#ifdef HAVE_ONNXRUNTIME
+  struct CachedImageSession
+  {
+    QString modelPath;
+    int fallbackImageSize = 640;
+    std::unique_ptr<Ort::Env> env;
+    std::unique_ptr<Ort::Session> session;
+    std::string inputName;
+    std::vector<std::string> outputNames;
+    std::vector<const char *> outputNamePointers;
+    int inputChannels = 0;
+    int inputWidth = 0;
+    int inputHeight = 0;
+  };
+
+  struct ImageSessionCache
+  {
+    std::mutex mutex;
+    std::unique_ptr<CachedImageSession> session;
+    bool shuttingDown = false;
+  };
+
+  ImageSessionCache &imageSessionCache()
+  {
+    // A QtConcurrent worker can retire while the application is idle. On
+    // Windows, thread_local destructors run under the DLL loader lock, where
+    // an ORT session must never join its worker threads. Keep ownership outside
+    // TLS and release it explicitly before normal application shutdown instead
+    // of relying on a DLL/static destructor.
+    static ImageSessionCache *cache = new ImageSessionCache;
+    return *cache;
+  }
+#endif
+
   struct RawCandidate
   {
     float centerX = 0;
@@ -849,6 +885,16 @@ QgsEcoOnnxInference::Result QgsEcoOnnxInference::run( QgsRasterLayer *rasterLaye
 #endif
 }
 
+void QgsEcoOnnxInference::shutdownImageSessionCache()
+{
+#ifdef HAVE_ONNXRUNTIME
+  ImageSessionCache &store = imageSessionCache();
+  const std::lock_guard<std::mutex> lock( store.mutex );
+  store.shuttingDown = true;
+  store.session.reset();
+#endif
+}
+
 QgsEcoOnnxInference::Result QgsEcoOnnxInference::run( const QImage &inputImage, const Parameters &parameters, const ProgressCallback &progress )
 {
   Result result;
@@ -873,28 +919,23 @@ QgsEcoOnnxInference::Result QgsEcoOnnxInference::run( const QImage &inputImage, 
 
   try
   {
-    struct CachedSession
+    ImageSessionCache &store = imageSessionCache();
+    // Serialize model replacement and inference so another photo task cannot
+    // replace names, dimensions or the session while this request uses them.
+    const std::lock_guard<std::mutex> lock( store.mutex );
+    if ( store.shuttingDown )
     {
-      QString modelPath;
-      int fallbackImageSize = 640;
-      std::unique_ptr<Ort::Env> env;
-      std::unique_ptr<Ort::Session> session;
-      std::string inputName;
-      std::vector<std::string> outputNames;
-      std::vector<const char *> outputNamePointers;
-      int inputChannels = 0;
-      int inputWidth = 0;
-      int inputHeight = 0;
-    };
-
-    thread_local std::unique_ptr<CachedSession> cache;
+      result.error = QStringLiteral( "照片智能识别组件正在关闭。" );
+      return result;
+    }
+    std::unique_ptr<CachedImageSession> &cache = store.session;
     const bool rebuildSession = !cache || cache->modelPath != parameters.modelPath || cache->fallbackImageSize != parameters.fallbackImageSize;
     if ( rebuildSession )
     {
-      cache = std::make_unique<CachedSession>();
-      cache->modelPath = parameters.modelPath;
-      cache->fallbackImageSize = parameters.fallbackImageSize;
-      cache->env = std::make_unique<Ort::Env>( ORT_LOGGING_LEVEL_WARNING, "qgis-eco-restoration" );
+      auto loaded = std::make_unique<CachedImageSession>();
+      loaded->modelPath = parameters.modelPath;
+      loaded->fallbackImageSize = parameters.fallbackImageSize;
+      loaded->env = std::make_unique<Ort::Env>( ORT_LOGGING_LEVEL_WARNING, "qgis-eco-restoration" );
 
       Ort::SessionOptions sessionOptions;
       sessionOptions.SetGraphOptimizationLevel( GraphOptimizationLevel::ORT_ENABLE_ALL );
@@ -904,50 +945,48 @@ QgsEcoOnnxInference::Result QgsEcoOnnxInference::run( const QImage &inputImage, 
 
 #ifdef _WIN32
       const std::wstring modelPath = parameters.modelPath.toStdWString();
-      cache->session = std::make_unique<Ort::Session>( *cache->env, modelPath.c_str(), sessionOptions );
+      loaded->session = std::make_unique<Ort::Session>( *loaded->env, modelPath.c_str(), sessionOptions );
 #else
       const std::string modelPath = parameters.modelPath.toStdString();
-      cache->session = std::make_unique<Ort::Session>( *cache->env, modelPath.c_str(), sessionOptions );
+      loaded->session = std::make_unique<Ort::Session>( *loaded->env, modelPath.c_str(), sessionOptions );
 #endif
-      if ( !cache->session || cache->session->GetInputCount() != 1 || cache->session->GetOutputCount() < 2 )
+      if ( !loaded->session || loaded->session->GetInputCount() != 1 || loaded->session->GetOutputCount() < 2 )
       {
         result.error = QStringLiteral( "模型不是受支持的单输入 YOLO 分割模型。" );
-        cache.reset();
         return result;
       }
 
       Ort::AllocatorWithDefaultOptions allocator;
-      const auto inputNameAllocated = cache->session->GetInputNameAllocated( 0, allocator );
-      cache->inputName = inputNameAllocated.get();
-      const std::vector<int64_t> declaredInputShape = cache->session->GetInputTypeInfo( 0 ).GetTensorTypeAndShapeInfo().GetShape();
+      const auto inputNameAllocated = loaded->session->GetInputNameAllocated( 0, allocator );
+      loaded->inputName = inputNameAllocated.get();
+      const std::vector<int64_t> declaredInputShape = loaded->session->GetInputTypeInfo( 0 ).GetTensorTypeAndShapeInfo().GetShape();
       if ( declaredInputShape.size() != 4 )
       {
         result.error = QStringLiteral( "模型输入必须是 NCHW 四维张量。" );
-        cache.reset();
         return result;
       }
 
-      cache->inputChannels = declaredInputShape[1] > 0 ? static_cast<int>( declaredInputShape[1] ) : 3;
-      cache->inputHeight = declaredInputShape[2] > 0 ? static_cast<int>( declaredInputShape[2] ) : parameters.fallbackImageSize;
-      cache->inputWidth = declaredInputShape[3] > 0 ? static_cast<int>( declaredInputShape[3] ) : parameters.fallbackImageSize;
-      if ( cache->inputChannels != 3 || cache->inputWidth < 32 || cache->inputHeight < 32 )
+      loaded->inputChannels = declaredInputShape[1] > 0 ? static_cast<int>( declaredInputShape[1] ) : 3;
+      loaded->inputHeight = declaredInputShape[2] > 0 ? static_cast<int>( declaredInputShape[2] ) : parameters.fallbackImageSize;
+      loaded->inputWidth = declaredInputShape[3] > 0 ? static_cast<int>( declaredInputShape[3] ) : parameters.fallbackImageSize;
+      if ( loaded->inputChannels != 3 || loaded->inputWidth < 32 || loaded->inputHeight < 32 )
       {
         result.error = QStringLiteral( "目前仅支持三通道 RGB 图像模型。" );
-        cache.reset();
         return result;
       }
 
-      cache->outputNames.clear();
-      cache->outputNamePointers.clear();
-      cache->outputNames.reserve( cache->session->GetOutputCount() );
-      for ( size_t index = 0; index < cache->session->GetOutputCount(); ++index )
+      loaded->outputNames.reserve( loaded->session->GetOutputCount() );
+      for ( size_t index = 0; index < loaded->session->GetOutputCount(); ++index )
       {
-        auto name = cache->session->GetOutputNameAllocated( index, allocator );
-        cache->outputNames.emplace_back( name.get() );
+        auto name = loaded->session->GetOutputNameAllocated( index, allocator );
+        loaded->outputNames.emplace_back( name.get() );
       }
-      cache->outputNamePointers.reserve( cache->outputNames.size() );
-      for ( const std::string &name : cache->outputNames )
-        cache->outputNamePointers.push_back( name.c_str() );
+      loaded->outputNamePointers.reserve( loaded->outputNames.size() );
+      for ( const std::string &name : loaded->outputNames )
+        loaded->outputNamePointers.push_back( name.c_str() );
+      // Retire the previous session on this normal task stack only after the
+      // replacement has been fully loaded and validated.
+      cache = std::move( loaded );
     }
 
     if ( !cache || !cache->session )

@@ -1,4 +1,4 @@
-***************************************************************************
+/***************************************************************************
   QgsAttributeTableDialog.cpp
   -------------------
          date                 : Feb 2009
@@ -442,15 +442,21 @@ QgsAttributeTableDialog::QgsAttributeTableDialog(
       initialView = static_cast<int>( configuredView );
     }
 
-    // Jianghe disturbance recognition results are edited as a dataset. Always
-    // open their attribute table in row/column mode, regardless of QGIS's
-    // remembered global form/table preference. Other layers keep the normal
-    // QGIS behavior.
-    const bool isEcoDisturbanceResult = mLayer
+    // Jianghe result and tower layers are edited as datasets. Always open
+    // them in row/column mode, regardless of QGIS's remembered global
+    // form/table preference. Other layers keep the normal QGIS behavior.
+    const QString ecoCategory = mLayer ? mLayer->customProperty( QStringLiteral( "eco/category" ) ).toString() : QString();
+    const bool hasTowerFields = mLayer && mLayer->geometryType() == Qgis::GeometryType::Point
+                                && ( mLayer->fields().lookupField( QStringLiteral( "tower_name" ) ) >= 0
+                                     || mLayer->fields().lookupField( QStringLiteral( "tower_no" ) ) >= 0 );
+    const bool forceEcoTableView = mLayer
       && ( mLayer->customProperty( QStringLiteral( "eco/resultType" ) ).toString() == QLatin1String( "construction-disturbance" )
-           || mLayer->customProperty( QStringLiteral( "eco/category" ) ).toString() == QLatin1String( "recognition-result" )
+           || ecoCategory == QLatin1String( "recognition-result" )
+           || ecoCategory == QLatin1String( "tower" )
+           || ecoCategory == QLatin1String( "manual-tower" )
+           || hasTowerFields
            || mLayer->name().startsWith( QStringLiteral( "施工扰动识别成果" ) ) );
-    if ( isEcoDisturbanceResult )
+    if ( forceEcoTableView )
       initialView = QgsDualView::AttributeTable;
 
     mMainView->setView( static_cast<QgsDualView::ViewMode>( initialView ) );

@@ -9,7 +9,9 @@
 #define QGSECOPHOTOWORKBENCH_H
 
 #include <QPolygonF>
+#include <QImage>
 #include <QPointer>
+#include <QQueue>
 #include <QRectF>
 #include <QSet>
 #include <QString>
@@ -26,6 +28,7 @@ class QPushButton;
 class QVariantAnimation;
 class QTabWidget;
 class QCheckBox;
+template<class T> class QFutureWatcher;
 
 class EcoPhotoAnnotationView;
 
@@ -64,16 +67,19 @@ class QgsEcoPhotoWorkbench final : public QWidget
 
   private:
     void reloadIndex();
-    void saveIndex() const;
+    bool saveIndex() const;
     void scheduleIndexSave();
     void rebuildPhotoList();
-    void scheduleThumbnailLoading();
+    void queueThumbnail( const QString &path, QWidget *entry );
+    void loadNextThumbnail();
+    void loadPreviewImage( bool fused );
+    void cleanupObsoleteFusedPhotos();
     void showSelectedPhoto();
     void showPhotoAt( int index );
     void showSelectedFusedPhoto();
     void rebuildFusedList();
-    void updatePhotoListItem( int index, bool loadThumbnail = true );
-    void updateFusedListItem( int index, bool loadThumbnail = true );
+    void updatePhotoListItem( int index, bool loadThumbnail = false );
+    void updateFusedListItem( int index, bool loadThumbnail = false );
     void updateSummary();
     void setBusy( bool busy, const QString &status = QString() );
     void setTaskProgress( int current, int total, const QString &status );
@@ -100,10 +106,19 @@ class QgsEcoPhotoWorkbench final : public QWidget
     QString mPhaseName;
     QString mWorkspacePath;
     bool mBusy = false;
+    bool mCreatingFusion = false;
     bool mIndexSavePending = false;
     bool mPendingPhaseContext = false;
     quint64 mContextGeneration = 0;
-    quint64 mThumbnailGeneration = 0;
+    QQueue<QPair<QString, QPointer<QWidget>>> mThumbnailRequests;
+    QPointer<QFutureWatcher<QImage>> mThumbnailWatcher;
+    QPointer<QFutureWatcher<QImage>> mPhotoPreviewWatcher;
+    QPointer<QFutureWatcher<QImage>> mFusedPreviewWatcher;
+    quint64 mPhotoPreviewRequest = 0;
+    quint64 mFusedPreviewRequest = 0;
+    int mRequestedPhotoIndex = -1;
+    int mRequestedFusedIndex = -1;
+    QString mDisplayedPhotoPath;
     QString mPendingPhaseId;
     QString mPendingPhaseName;
     QString mPendingWorkspacePath;
@@ -136,6 +151,7 @@ class QgsEcoPhotoWorkbench final : public QWidget
     QCheckBox *mSelectAllCheckBox = nullptr;
     bool mDeleteMode = false;
     QSet<QString> mCheckedPhotoPaths;
+    QSet<QString> mObsoleteFusedPaths;
     QVector<PhotoRecord> mPhotos;
 };
 

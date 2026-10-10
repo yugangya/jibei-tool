@@ -62,6 +62,8 @@ class QgsEcoOnnxInference
     using ProgressCallback = std::function<bool( int current, int total, const QString &message, const QString &sourceName, const QImage &previewImage )>;
 
     static bool isRuntimeAvailable();
+    /** Releases the photo model cache during normal application shutdown. */
+    static void shutdownImageSessionCache();
     static Result run( QgsRasterLayer *rasterLayer, const Parameters &parameters, const ProgressCallback &progress );
     static Result run( const QImage &inputImage, const Parameters &parameters, const ProgressCallback &progress = ProgressCallback() );
 };

@@ -76,6 +76,7 @@
 #include <QSplitter>
 #include <QTextStream>
 #include <QTimer>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -89,6 +90,7 @@ namespace
 {
   constexpr int sPhotoThumbnailExtent = 88;
   constexpr int sPhotoPreviewMaxPixels = 4096;
+  constexpr int sPhotoProblemClassCount = 4;
 
   QString photoIndexFilePath( const QString &workspacePath )
   {
@@ -125,7 +127,7 @@ namespace
     const QSize sourceSize = reader.size();
     if ( sourceSize.isValid() )
     {
-      QSize desired = targetSize;
+      QSize desired = targetSize.isEmpty() ? QSize() : sourceSize.scaled( targetSize, Qt::KeepAspectRatioByExpanding );
       if ( desired.isEmpty() )
       {
         desired = sourceSize;
@@ -146,17 +148,26 @@ namespace
 
   QColor annotationColor( int classId )
   {
-    return classId == 1 ? QColor( QStringLiteral( "#f59e0b" ) ) : QColor( QStringLiteral( "#ef4444" ) );
-  }
-
-  QString yoloClassName( int classId )
-  {
-    return classId == 1 ? QString::fromUtf8( "\xE9\xA1\xBA\xE5\x9D\xA1\xE6\xBA\x9C\xE6\xB8\xA3" ) : QString::fromUtf8( "\xE6\x96\xBD\xE5\xB7\xA5\xE6\x89\xB0\xE5\x8A\xA8" );
+    switch ( classId )
+    {
+      case 1: return QColor( QStringLiteral( "#f59e0b" ) );
+      case 2: return QColor( QStringLiteral( "#22c55e" ) );
+      case 3: return QColor( QStringLiteral( "#22d3ee" ) );
+      default: return QColor( QStringLiteral( "#ef4444" ) );
+    }
   }
 
   QString photoClassName( int classId )
   {
-    return classId == 1 ? QString::fromUtf8( "\xE9\xA1\xBA\xE5\x9D\xA1\xE6\xBA\x9C\xE6\xB8\xA3" ) : QString::fromUtf8( "\xE6\x96\xBD\xE5\xB7\xA5\xE6\x89\xB0\xE5\x8A\xA8" );
+    // Keep the original YOLO IDs 0 and 1 unchanged for existing photo indices.
+    switch ( classId )
+    {
+      case 0: return QStringLiteral( "施工扰动" );
+      case 1: return QStringLiteral( "顺坡溜渣" );
+      case 2: return QStringLiteral( "植被未恢复" );
+      case 3: return QStringLiteral( "临时措施" );
+      default: return QStringLiteral( "类别_%1" ).arg( classId );
+    }
   }
 
   QString safeOutputBaseName( const QString &sourcePath, int index )
@@ -167,11 +178,17 @@ namespace
     return name;
   }
 
+  QString fusedOutputFileName( const QString &sourcePath, int index )
+  {
+    return QStringLiteral( "%1_%2_fused.png" )
+      .arg( safeOutputBaseName( sourcePath, index ) )
+      .arg( index + 1, 5, 10, QLatin1Char( '0' ) );
+  }
+
   struct PhotoAnnotationStats
   {
     int total = 0;
-    int disturbanceCount = 0;
-    int slopeCount = 0;
+    int classCounts[sPhotoProblemClassCount] = {};
     int autoCount = 0;
     int manualCount = 0;
   };
@@ -182,10 +199,8 @@ namespace
     for ( const QgsEcoPhotoWorkbench::Annotation &annotation : record.annotations )
     {
       ++stats.total;
-      if ( annotation.classId == 1 )
-        ++stats.slopeCount;
-      else
-        ++stats.disturbanceCount;
+      if ( annotation.classId >= 0 && annotation.classId < sPhotoProblemClassCount )
+        ++stats.classCounts[annotation.classId];
       if ( annotation.source == QStringLiteral( "auto" ) )
         ++stats.autoCount;
       else
@@ -229,10 +244,14 @@ namespace
     const PhotoAnnotationStats stats = photoAnnotationStats( record );
     if ( !record.fusedPath.isEmpty() && QFileInfo::exists( record.fusedPath ) )
       return QColor( QStringLiteral( "#4ade80" ) );
-    if ( stats.disturbanceCount > stats.slopeCount && stats.disturbanceCount > 0 )
-      return QColor( QStringLiteral( "#f87171" ) );
-    if ( stats.slopeCount > 0 )
-      return QColor( QStringLiteral( "#f59e0b" ) );
+    int dominantClass = 0;
+    for ( int classId = 1; classId < sPhotoProblemClassCount; ++classId )
+    {
+      if ( stats.classCounts[classId] > stats.classCounts[dominantClass] )
+        dominantClass = classId;
+    }
+    if ( stats.classCounts[dominantClass] > 0 )
+      return annotationColor( dominantClass );
     if ( stats.autoCount > 0 )
       return QColor( QStringLiteral( "#38bdf8" ) );
     return QColor( QStringLiteral( "#64748b" ) );
@@ -254,23 +273,23 @@ namespace
   QString photoItemInfoHtml( const QgsEcoPhotoWorkbench::PhotoRecord &record )
   {
     const PhotoAnnotationStats stats = photoAnnotationStats( record );
-    const QString disturbanceColor = stats.disturbanceCount > 0 ? QStringLiteral( "#f87171" ) : QStringLiteral( "#94a3b8" );
-    const QString slopeColor = stats.slopeCount > 0 ? QStringLiteral( "#f87171" ) : QStringLiteral( "#94a3b8" );
+    QString html = QStringLiteral( "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"font-size:11px; color:#cbd5e1;\">" );
+    for ( int classId = 0; classId < sPhotoProblemClassCount; ++classId )
+    {
+      const QString countColor = stats.classCounts[classId] > 0 ? annotationColor( classId ).lighter( 115 ).name() : QStringLiteral( "#708094" );
+      html += QStringLiteral( "<tr><td style=\"white-space:nowrap;\">%1</td><td align=\"right\" style=\"color:%2; font-weight:700;\">%3</td></tr>" )
+                .arg( photoClassName( classId ), countColor, QString::number( stats.classCounts[classId] ) );
+    }
+    return html + QStringLiteral( "</table>" );
+  }
+
+  QString photoItemStatusHtml( const QgsEcoPhotoWorkbench::PhotoRecord &record )
+  {
     const bool fused = !record.fusedPath.isEmpty() && QFileInfo::exists( record.fusedPath );
-    const QString fusionText = fused ? QStringLiteral( "已融合" ) : QStringLiteral( "未融合" );
-    const QString fusionColor = fused ? QStringLiteral( "#4ade80" ) : QStringLiteral( "#94a3b8" );
-    return QStringLiteral(
-             "<div style=\"padding:4px 0 1px 0; line-height:18px; font-size:11px;\">"
-             "<div style=\"white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#cbd5e1;\">施工扰动 <span style=\"color:%1; font-weight:800;\">%2</span></div>"
-             "<div style=\"white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#cbd5e1;\">顺坡溜渣 <span style=\"color:%3; font-weight:800;\">%4</span></div>"
-             "<div style=\"white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:%5; font-weight:700;\">%6</div>"
-             "</div>" )
-      .arg( disturbanceColor,
-            QString::number( stats.disturbanceCount ),
-            slopeColor,
-            QString::number( stats.slopeCount ),
-            fusionColor,
-            fusionText );
+    return QStringLiteral( "<span style=\"color:%1;\">%2</span><span style=\"color:#8b9db0;\"> · %3 个图斑</span>" )
+      .arg( fused ? QStringLiteral( "#4ade80" ) : QStringLiteral( "#94a3b8" ),
+            fused ? QStringLiteral( "已融合" ) : QStringLiteral( "未融合" ),
+            QString::number( record.annotations.size() ) );
   }
 
   QString photoPreviewInfoHtml( const QString &path, const QImage &image, const QgsEcoPhotoWorkbench::PhotoRecord &record )
@@ -282,9 +301,13 @@ namespace
     const QString totalLine = photoChipHtml( QStringLiteral( "总标绘" ), QString::number( stats.total ), QColor( QStringLiteral( "#60a5fa" ) ), QColor( QStringLiteral( "#122033" ) ) )
                               + photoChipHtml( QStringLiteral( "自动" ), QString::number( stats.autoCount ), stats.autoCount > 0 ? QColor( QStringLiteral( "#38bdf8" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), stats.autoCount > 0 ? QColor( QStringLiteral( "#122636" ) ) : QColor( QStringLiteral( "#1a2330" ) ) )
                               + photoChipHtml( QStringLiteral( "人工" ), QString::number( stats.manualCount ), stats.manualCount > 0 ? QColor( QStringLiteral( "#a78bfa" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), stats.manualCount > 0 ? QColor( QStringLiteral( "#221933" ) ) : QColor( QStringLiteral( "#1a2330" ) ) );
-    const QString classLine = photoChipHtml( QStringLiteral( "施工扰动" ), QString::number( stats.disturbanceCount ), stats.disturbanceCount > 0 ? QColor( QStringLiteral( "#f87171" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), stats.disturbanceCount > 0 ? QColor( QStringLiteral( "#2a1b22" ) ) : QColor( QStringLiteral( "#1a2330" ) ) )
-                              + photoChipHtml( QStringLiteral( "顺坡溜渣" ), QString::number( stats.slopeCount ), stats.slopeCount > 0 ? QColor( QStringLiteral( "#f59e0b" ) ) : QColor( QStringLiteral( "#94a3b8" ) ), stats.slopeCount > 0 ? QColor( QStringLiteral( "#2b2214" ) ) : QColor( QStringLiteral( "#1a2330" ) ) )
-                              + photoFusionStateHtml( record );
+    QString classLine;
+    for ( int classId = 0; classId < sPhotoProblemClassCount; ++classId )
+    {
+      const QColor accent = stats.classCounts[classId] > 0 ? annotationColor( classId ) : QColor( QStringLiteral( "#94a3b8" ) );
+      classLine += photoChipHtml( photoClassName( classId ), QString::number( stats.classCounts[classId] ), accent, QColor( QStringLiteral( "#1a2330" ) ) );
+    }
+    classLine += photoFusionStateHtml( record );
     return QStringLiteral( "<div style=\"line-height:1.5; text-align:left;\">"
                           "<div style=\"font-size:13px; font-weight:700; color:#f8fbff;\">%1</div>"
                           "<div style=\"color:#94a3b8; margin:2px 0 6px 0;\">%2</div>"
@@ -372,6 +395,23 @@ namespace
     return !path.isEmpty() && QDir().mkpath( path );
   }
 
+  // Commit derived files atomically so preview readers never observe a
+  // partially encoded image during a repeated fusion operation.
+  bool saveImageAtomically( const QImage &image, const QString &targetPath, const char *format )
+  {
+    if ( image.isNull() || targetPath.isEmpty() || !ensureDirectory( QFileInfo( targetPath ).absolutePath() ) )
+      return false;
+    QSaveFile file( targetPath );
+    if ( !file.open( QIODevice::WriteOnly ) )
+      return false;
+    if ( !image.save( &file, format ) )
+    {
+      file.cancelWriting();
+      return false;
+    }
+    return file.commit();
+  }
+
   QString indexedOutputPath( const QString &directory, const QString &sourcePath, int index, const QString &suffix = QString() )
   {
     const QFileInfo sourceInfo( sourcePath );
@@ -387,10 +427,26 @@ namespace
   {
     if ( sourcePath.isEmpty() || targetPath.isEmpty() || !QFileInfo( sourcePath ).isFile() )
       return false;
-    ensureDirectory( QFileInfo( targetPath ).absolutePath() );
-    if ( QFileInfo::exists( targetPath ) && !QFile::remove( targetPath ) )
+    if ( !ensureDirectory( QFileInfo( targetPath ).absolutePath() ) )
       return false;
-    return QFile::copy( sourcePath, targetPath );
+
+    QFile source( sourcePath );
+    if ( !source.open( QIODevice::ReadOnly ) )
+      return false;
+    QSaveFile target( targetPath );
+    if ( !target.open( QIODevice::WriteOnly ) )
+      return false;
+    QByteArray buffer( 1024 * 1024, Qt::Uninitialized );
+    while ( !source.atEnd() )
+    {
+      const qint64 read = source.read( buffer.data(), buffer.size() );
+      if ( read <= 0 || target.write( buffer.constData(), read ) != read )
+      {
+        target.cancelWriting();
+        return false;
+      }
+    }
+    return target.commit();
   }
 
   QWidget *dialogParentFor( QWidget *widget )
@@ -436,13 +492,56 @@ class PhotoSelectionCheckBox final : public QCheckBox
       QPainter painter( this ); painter.setRenderHint( QPainter::Antialiasing, true );
       const QRectF box( 2.0, 2.0, 14.0, 14.0 ); const bool enabled = isEnabled(); const bool hovered = underMouse();
       QColor border = !enabled ? QColor( QStringLiteral( "#454545" ) ) : hovered ? QColor( QStringLiteral( "#c5c5c5" ) ) : QColor( QStringLiteral( "#6b6b6b" ) );
-      QColor fill = isChecked() ? QColor( QStringLiteral( "#007acc" ) ) : QColor( QStringLiteral( "#1e1e1e" ) ); if ( !enabled ) fill = QColor( QStringLiteral( "#252526" ) );
+      QColor fill = isChecked() ? QColor( enabled ? QStringLiteral( "#007acc" ) : QStringLiteral( "#174c70" ) ) : QColor( QStringLiteral( "#1e1e1e" ) ); if ( !enabled && !isChecked() ) fill = QColor( QStringLiteral( "#252526" ) );
       painter.setPen( QPen( border, 1.0 ) ); painter.setBrush( fill ); painter.drawRoundedRect( box, 2.0, 2.0 );
-      if ( isChecked() && enabled ) { QPainterPath check; check.moveTo( 5.0, 9.0 ); check.lineTo( 7.4, 11.4 ); check.lineTo( 12.8, 5.8 ); painter.setPen( QPen( Qt::white, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin ) ); painter.setBrush( Qt::NoBrush ); painter.drawPath( check ); }
+      if ( isChecked() ) { QPainterPath check; check.moveTo( 5.0, 9.0 ); check.lineTo( 7.4, 11.4 ); check.lineTo( 12.8, 5.8 ); painter.setPen( QPen( enabled ? Qt::white : QColor( QStringLiteral( "#a9cde2" ) ), 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin ) ); painter.setBrush( Qt::NoBrush ); painter.drawPath( check ); }
       if ( hasFocus() ) { painter.setPen( QPen( QColor( 0, 122, 204, 180 ), 1.0, Qt::DashLine ) ); painter.setBrush( Qt::NoBrush ); painter.drawRoundedRect( box.adjusted( -1.0, -1.0, 1.0, 1.0 ), 3.0, 3.0 ); }
     }
     void mouseMoveEvent( QMouseEvent *event ) override { update(); QCheckBox::mouseMoveEvent( event ); }
     void leaveEvent( QEvent *event ) override { update(); QCheckBox::leaveEvent( event ); }
+};
+
+class PhotoThumbnailWidget final : public QWidget
+{
+  public:
+    explicit PhotoThumbnailWidget( QWidget *parent = nullptr ) : QWidget( parent )
+    {
+      setObjectName( QStringLiteral( "EcoPhotoThumbnail" ) );
+      setFixedSize( 76, 76 );
+      setAttribute( Qt::WA_TransparentForMouseEvents, true );
+    }
+    void setPixmap( const QPixmap &pixmap ) { mPixmap = pixmap; update(); }
+    void setBorderColor( const QColor &color ) { mBorderColor = color; update(); }
+
+  protected:
+    void paintEvent( QPaintEvent *event ) override
+    {
+      Q_UNUSED( event )
+      QPainter painter( this );
+      painter.setRenderHint( QPainter::Antialiasing, true );
+      painter.setRenderHint( QPainter::SmoothPixmapTransform, true );
+      const QRectF target = QRectF( rect() ).adjusted( 0.5, 0.5, -0.5, -0.5 );
+      QPainterPath clip;
+      clip.addRoundedRect( target, 8.0, 8.0 );
+      painter.setClipPath( clip );
+      painter.fillRect( target, QColor( QStringLiteral( "#26384a" ) ) );
+      if ( !mPixmap.isNull() )
+      {
+        const QSizeF sourceSize = mPixmap.size();
+        const double scale = std::max( target.width() / sourceSize.width(), target.height() / sourceSize.height() );
+        const QSizeF cropSize( target.width() / scale, target.height() / scale );
+        const QRectF source( QPointF( ( sourceSize.width() - cropSize.width() ) / 2.0, ( sourceSize.height() - cropSize.height() ) / 2.0 ), cropSize );
+        painter.drawPixmap( target, mPixmap, source );
+      }
+      painter.setClipping( false );
+      painter.setPen( QPen( mBorderColor, 1.0 ) );
+      painter.setBrush( Qt::NoBrush );
+      painter.drawRoundedRect( target, 8.0, 8.0 );
+    }
+
+  private:
+    QPixmap mPixmap;
+    QColor mBorderColor = QColor( QStringLiteral( "#344255" ) );
 };
 
 class PhotoListEntryWidget final : public QWidget
@@ -450,24 +549,21 @@ class PhotoListEntryWidget final : public QWidget
   public:
     explicit PhotoListEntryWidget( QWidget *parent = nullptr, bool checkable = true ) : QWidget( parent )
     {
+      setObjectName( QStringLiteral( "EcoPhotoListCard" ) );
       setAttribute( Qt::WA_TranslucentBackground, true );
       setMouseTracking( true );
       setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
 
       auto *root = new QHBoxLayout( this );
-      root->setContentsMargins( 10, 10, 10, 10 );
-      root->setSpacing( 10 );
+      root->setContentsMargins( 16, 12, 14, 12 );
+      root->setSpacing( 12 );
 
-      mThumbnail = new QLabel( this );
-      mThumbnail->setFixedSize( 74, 74 );
-      mThumbnail->setAlignment( Qt::AlignCenter );
-      mThumbnail->setAttribute( Qt::WA_TransparentForMouseEvents, true );
-      mThumbnail->setStyleSheet( QStringLiteral( "background:#223041; border:1px solid #344255; border-radius:10px;" ) );
-      root->addWidget( mThumbnail, 0, Qt::AlignTop );
+      mThumbnail = new PhotoThumbnailWidget( this );
+      root->addWidget( mThumbnail, 0, Qt::AlignVCenter );
 
       auto *details = new QVBoxLayout;
       details->setContentsMargins( 0, 0, 0, 0 );
-      details->setSpacing( 5 );
+      details->setSpacing( 4 );
 
       auto *top = new QHBoxLayout;
       top->setContentsMargins( 0, 0, 0, 0 );
@@ -479,15 +575,18 @@ class PhotoListEntryWidget final : public QWidget
 
       mNameLabel = new QLabel( this );
       mNameLabel->setAttribute( Qt::WA_TransparentForMouseEvents, true );
-      mNameLabel->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
-      mNameLabel->setStyleSheet( QStringLiteral( "color:#f6fbff; font-weight:700; font-size:12px;" ) );
+      mNameLabel->setTextFormat( Qt::PlainText );
+      mNameLabel->setWordWrap( false );
+      mNameLabel->setMinimumWidth( 0 );
+      mNameLabel->setSizePolicy( QSizePolicy::Ignored, QSizePolicy::Preferred );
+      mNameLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:#f6fbff; font-weight:700; font-size:12px;" ) );
       titleStack->addWidget( mNameLabel );
 
       mSubTitleLabel = new QLabel( this );
       mSubTitleLabel->setAttribute( Qt::WA_TransparentForMouseEvents, true );
       mSubTitleLabel->setTextFormat( Qt::RichText );
       mSubTitleLabel->setWordWrap( false );
-      mSubTitleLabel->setStyleSheet( QStringLiteral( "color:#9aa8b8; font-size:10px;" ) );
+      mSubTitleLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:#9aa8b8; font-size:10px;" ) );
       titleStack->addWidget( mSubTitleLabel );
 
       top->addLayout( titleStack, 1 );
@@ -509,19 +608,19 @@ class PhotoListEntryWidget final : public QWidget
       mInfoLabel->setAttribute( Qt::WA_TransparentForMouseEvents, true );
       mInfoLabel->setTextFormat( Qt::RichText );
       mInfoLabel->setWordWrap( false );
-      mInfoLabel->setMinimumHeight( 54 );
-      mInfoLabel->setMaximumHeight( 54 );
-      mInfoLabel->setStyleSheet( QStringLiteral( "color:#9aa8b8; font-size:11px;" ) );
-      details->addWidget( mInfoLabel, 1 );
+      mInfoLabel->setFixedHeight( 72 );
+      mInfoLabel->setAlignment( Qt::AlignLeft | Qt::AlignVCenter );
+      mInfoLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:#9aa8b8; font-size:11px;" ) );
+      details->addWidget( mInfoLabel );
       root->addLayout( details, 1 );
       updateChrome();
     }
 
     void setThumbnail( const QPixmap &pixmap )
     {
-      mThumbnail->setPixmap( pixmap.scaled( mThumbnail->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation ) );
+      mThumbnail->setPixmap( pixmap );
     }
-    void setName( const QString &name ) { mNameLabel->setText( name ); mNameLabel->setToolTip( name ); }
+    void setName( const QString &name ) { mName = name; updateElidedName(); mNameLabel->setToolTip( name ); }
     void setSubtitle( const QString &text ) { mSubTitleLabel->setText( text ); mSubTitleLabel->setVisible( !text.trimmed().isEmpty() ); }
     void setInfo( const QString &info ) { mInfoLabel->setText( info ); }
     void setStateHtml( const QString &html ) { mStateLabel->setText( html ); mStateLabel->setVisible( !html.trimmed().isEmpty() ); }
@@ -541,6 +640,7 @@ class PhotoListEntryWidget final : public QWidget
     void onClicked( std::function<void()> callback ) { mClickCallback = std::move( callback ); }
 
   protected:
+    void resizeEvent( QResizeEvent *event ) override { QWidget::resizeEvent( event ); updateElidedName(); }
     void paintEvent( QPaintEvent *event ) override
     {
       Q_UNUSED( event )
@@ -573,30 +673,34 @@ class PhotoListEntryWidget final : public QWidget
     void leaveEvent( QEvent *event ) override { Q_UNUSED( event ); mHovered = false; updateChrome(); update(); QWidget::leaveEvent( event ); }
 
   private:
+    void updateElidedName()
+    {
+      mNameLabel->setText( mNameLabel->fontMetrics().elidedText( mName, Qt::ElideMiddle, std::max( 0, mNameLabel->width() ) ) );
+    }
     void updateChrome()
     {
       if ( mThumbnail )
       {
-        const QString thumbBg = mSelected ? QStringLiteral( "#22364b" ) : mHovered ? QStringLiteral( "#223041" ) : QStringLiteral( "#1c2734" );
         const QString thumbBorder = mSelected ? mAccentColor.lighter( 150 ).name() : mHovered ? mAccentColor.lighter( 124 ).name() : QStringLiteral( "#344255" );
-        mThumbnail->setStyleSheet( QStringLiteral( "background:%1; border:1px solid %2; border-radius:10px;" ).arg( thumbBg, thumbBorder ) );
+        mThumbnail->setBorderColor( QColor( thumbBorder ) );
       }
       if ( mNameLabel )
-        mNameLabel->setStyleSheet( QStringLiteral( "color:%1; font-weight:%2; font-size:12px;" ).arg( mSelected ? QStringLiteral( "#ffffff" ) : mHovered ? QStringLiteral( "#f8fcff" ) : QStringLiteral( "#f6fbff" ), mSelected ? QStringLiteral( "800" ) : QStringLiteral( "700" ) ) );
+        mNameLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:%1; font-weight:%2; font-size:12px;" ).arg( mSelected ? QStringLiteral( "#ffffff" ) : mHovered ? QStringLiteral( "#f8fcff" ) : QStringLiteral( "#f6fbff" ), mSelected ? QStringLiteral( "800" ) : QStringLiteral( "700" ) ) );
       if ( mSubTitleLabel )
-        mSubTitleLabel->setStyleSheet( QStringLiteral( "color:%1; font-size:10px;" ).arg( mSelected ? QStringLiteral( "#d7e8f7" ) : QStringLiteral( "#9aa8b8" ) ) );
+        mSubTitleLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:%1; font-size:10px;" ).arg( mSelected ? QStringLiteral( "#d7e8f7" ) : QStringLiteral( "#9aa8b8" ) ) );
       if ( mStateLabel )
-        mStateLabel->setStyleSheet( QStringLiteral( "color:%1; font-size:10px; font-weight:700;" ).arg( mSelected ? QStringLiteral( "#edf7ff" ) : QStringLiteral( "#d7e2ee" ) ) );
+        mStateLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:%1; font-size:10px; font-weight:700;" ).arg( mSelected ? QStringLiteral( "#edf7ff" ) : QStringLiteral( "#d7e2ee" ) ) );
       if ( mInfoLabel )
-        mInfoLabel->setStyleSheet( QStringLiteral( "color:%1; font-size:10px;" ).arg( mSelected ? QStringLiteral( "#dce8f5" ) : QStringLiteral( "#9aa8b8" ) ) );
+        mInfoLabel->setStyleSheet( QStringLiteral( "background:transparent; border:0; padding:0; color:%1; font-size:11px;" ).arg( mSelected ? QStringLiteral( "#dce8f5" ) : QStringLiteral( "#9aa8b8" ) ) );
     }
 
-    QLabel *mThumbnail = nullptr;
+    PhotoThumbnailWidget *mThumbnail = nullptr;
     QLabel *mNameLabel = nullptr;
     QLabel *mSubTitleLabel = nullptr;
     QLabel *mStateLabel = nullptr;
     QLabel *mInfoLabel = nullptr;
     QCheckBox *mCheckBox = nullptr;
+    QString mName;
     std::function<void()> mClickCallback;
     QColor mAccentColor = QColor( QStringLiteral( "#38bdf8" ) );
     bool mHovered = false;
@@ -728,7 +832,7 @@ class DrawingPulseItem final : public QGraphicsObject
 class EcoPhotoAnnotationView final : public QGraphicsView
 {
   public:
-    explicit EcoPhotoAnnotationView( QWidget *parent = nullptr ) : QGraphicsView( parent ) { mScene = new QGraphicsScene( this ); setScene( mScene ); setRenderHint( QPainter::Antialiasing, true ); setRenderHint( QPainter::SmoothPixmapTransform, true ); setBackgroundBrush( QColor( QStringLiteral( "#111827" ) ) ); setFrameShape( QFrame::NoFrame ); setAlignment( Qt::AlignCenter ); setFocusPolicy( Qt::StrongFocus ); setMouseTracking( true ); viewport()->setMouseTracking( true ); setViewportUpdateMode( QGraphicsView::BoundingRectViewportUpdate ); setDragMode( QGraphicsView::ScrollHandDrag ); setTransformationAnchor( QGraphicsView::AnchorUnderMouse ); setResizeAnchor( QGraphicsView::AnchorViewCenter ); }
+    explicit EcoPhotoAnnotationView( QWidget *parent = nullptr ) : QGraphicsView( parent ) { mScene = new QGraphicsScene( this ); setScene( mScene ); setRenderHint( QPainter::Antialiasing, true ); setRenderHint( QPainter::SmoothPixmapTransform, true ); setBackgroundBrush( QColor( QStringLiteral( "#111827" ) ) ); setFrameShape( QFrame::NoFrame ); setAlignment( Qt::AlignCenter ); setFocusPolicy( Qt::StrongFocus ); setMouseTracking( true ); viewport()->setMouseTracking( true ); setViewportUpdateMode( QGraphicsView::BoundingRectViewportUpdate ); setDragMode( QGraphicsView::ScrollHandDrag ); setTransformationAnchor( QGraphicsView::AnchorUnderMouse ); setResizeAnchor( QGraphicsView::AnchorViewCenter ); setHorizontalScrollBarPolicy( Qt::ScrollBarAlwaysOff ); setVerticalScrollBarPolicy( Qt::ScrollBarAlwaysOff ); }
     void setImage( const QImage &image, const QVector<QgsEcoPhotoWorkbench::Annotation> &annotations )
     {
       clearDrawingPreview();
@@ -771,7 +875,18 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     bool finishCurrentDrawing() { if ( !mPixmapItem || mDrawingPoints.size() < 3 || !mAnnotationCallback ) return false; const QPolygonF normalized = normalizedPolygonFromScene( mDrawingPoints, mPixmapItem->boundingRect() ); const QRectF bounds = normalizedBoundingRect( normalized ); if ( normalized.size() < 3 || bounds.width() < 0.002 || bounds.height() < 0.002 ) return false; mAnnotationCallback( mDrawingClassId, mDrawingClassName, normalized ); clearDrawingPreview(); if ( mDrawingFinishedCallback ) mDrawingFinishedCallback(); return true; }
     void playCompletionPulse( int classId, const QPolygonF &normalizedPolygon ) { if ( !mScene || !mPixmapItem || normalizedPolygon.size() < 3 ) return; auto *pulse = new DrawingPulseItem( scenePolygonFromNormalized( normalizedPolygon, mPixmapItem->boundingRect() ), annotationColor( classId ) ); mScene->addItem( pulse ); auto *animation = new QVariantAnimation( mScene ); animation->setDuration( 560 ); animation->setStartValue( 0.0 ); animation->setEndValue( 1.0 ); animation->setEasingCurve( QEasingCurve::InOutCubic ); QPointer<DrawingPulseItem> guard = pulse; connect( animation, &QVariantAnimation::valueChanged, this, [guard]( const QVariant &value ) { if ( guard ) guard->setProgress( value.toReal() ); } ); connect( animation, &QVariantAnimation::finished, this, [guard, animation] { if ( guard ) { DrawingPulseItem *item = guard.data(); if ( item->scene() ) item->scene()->removeItem( item ); delete item; } animation->deleteLater(); } ); animation->start(); }
   protected:
-    void resizeEvent( QResizeEvent *event ) override { QGraphicsView::resizeEvent( event ); if ( !mImage.isNull() && !mUserAdjustedView ) fitToImage(); }
+    void resizeEvent( QResizeEvent *event ) override
+    {
+      QGraphicsView::resizeEvent( event );
+      if ( mImage.isNull() || mUserAdjustedView || mFitPending )
+        return;
+      mFitPending = true;
+      QTimer::singleShot( 0, this, [this] {
+        mFitPending = false;
+        if ( !mUserAdjustedView )
+          fitToImage();
+      } );
+    }
     void wheelEvent( QWheelEvent *event ) override { if ( mImage.isNull() ) { event->ignore(); return; } scale( event->angleDelta().y() >= 0 ? 1.16 : 1.0 / 1.16, event->angleDelta().y() >= 0 ? 1.16 : 1.0 / 1.16 ); mUserAdjustedView = true; event->accept(); }
     void mousePressEvent( QMouseEvent *event ) override
     {
@@ -863,15 +978,15 @@ class EcoPhotoAnnotationView final : public QGraphicsView
 
     void focusOutEvent( QFocusEvent *event ) override
     {
+      const bool commitPending = mDraggingEditHandle;
+      mSpacePanning = false;
+      mSpaceDragging = false;
+      mRightPanning = false;
+      mDraggingEditHandle = false;
       QGraphicsView::focusOutEvent( event );
-      // 窗口失去焦点时清理可能的拖动状态
-      if ( mSpaceDragging || mRightPanning || mDraggingEditHandle )
-      {
-        mSpaceDragging = false;
-        mRightPanning = false;
-        mDraggingEditHandle = false;
-        restoreInteractionCursor();
-      }
+      if ( commitPending )
+        commitEditGeometry();
+      restoreInteractionCursor();
     }
 
     bool event( QEvent *e ) override
@@ -884,9 +999,13 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       else if ( e->type() == QEvent::WindowDeactivate )
       {
         // 窗口失活时重置所有临时状态
+        const bool commitPending = mDraggingEditHandle;
+        mSpacePanning = false;
         mSpaceDragging = false;
         mRightPanning = false;
         mDraggingEditHandle = false;
+        if ( commitPending )
+          commitEditGeometry();
       }
       return QGraphicsView::event( e );
     }
@@ -957,7 +1076,20 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     }
     bool removeEditVertex( int vertexIndex ) { if ( mEditingAnnotationIndex < 0 || mEditPolygon.size() <= 3 || vertexIndex < 0 || vertexIndex >= mEditPolygon.size() ) return false; mEditPolygon.removeAt( vertexIndex ); refreshEditGeometry(); commitEditGeometry(); return true; }
   private:
-    void fitToImage() { if ( !mPixmapItem ) return; resetTransform(); fitInView( mPixmapItem, Qt::KeepAspectRatio ); centerOn( mPixmapItem ); mUserAdjustedView = false; }
+    void fitToImage()
+    {
+      if ( !mPixmapItem || viewport()->width() <= 4 || viewport()->height() <= 4 )
+        return;
+      const QRectF bounds = mPixmapItem->boundingRect();
+      if ( bounds.isEmpty() )
+        return;
+      // A single transform avoids fitInView/resetTransform toggling automatic
+      // scrollbars and re-entering resizeEvent when the window is restored.
+      const qreal factor = std::min( ( viewport()->width() - 4.0 ) / bounds.width(), ( viewport()->height() - 4.0 ) / bounds.height() );
+      setTransform( QTransform::fromScale( factor, factor ) );
+      centerOn( bounds.center() );
+    }
+    bool mFitPending = false;
     void clearAnnotationItems() { for ( QGraphicsPolygonItem *item : std::as_const( mAnnotationItems ) ) { if ( item && item->scene() ) item->scene()->removeItem( item ); delete item; } mAnnotationItems.clear(); }
     void rebuildAnnotationItems() { if ( !mPixmapItem ) return; clearAnnotationItems(); const QRectF imageRect = mPixmapItem->boundingRect(); for ( int i = 0; i < mAnnotations.size(); ++i ) { const auto &annotation = mAnnotations.at( i ); const QPolygonF polygon = scenePolygonFromNormalized( annotation.normalizedPolygon, imageRect ); if ( polygon.size() < 3 ) continue; auto *item = new PhotoPolygonItem( polygon, annotationColor( annotation.classId ) ); item->setData( 0, i ); item->setToolTip( annotation.className ); mScene->addItem( item ); mAnnotationItems.insert( i, item ); } }
     void clearSmartPromptPoints() { for ( QGraphicsItem *item : std::as_const( mSmartPromptItems ) ) { if ( item && item->scene() ) item->scene()->removeItem( item ); delete item; } mSmartPromptItems.clear(); mSmartPromptPoints.clear(); mSmartPromptLabels.clear(); mSegmentationInProgress = false; }
@@ -1154,6 +1286,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   mPhotoList->setIconSize( QSize( sPhotoThumbnailExtent, 64 ) );
   mPhotoList->setSelectionMode( QAbstractItemView::ExtendedSelection );
   mPhotoList->setMinimumWidth( 300 );
+  mPhotoList->setHorizontalScrollBarPolicy( Qt::ScrollBarAlwaysOff );
 
   QWidget *previewPanel = new QWidget( splitter );
   QVBoxLayout *previewLayout = new QVBoxLayout( previewPanel );
@@ -1178,8 +1311,8 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   annotationLayout->setSpacing( 6 );
      annotationLayout->addWidget( new QLabel( tr( "图斑类型" ), annotationPanel ) );
   mAnnotationClassCombo = new QComboBox( annotationPanel );
-  mAnnotationClassCombo->addItem( classColorIcon( annotationColor( 0 ) ), photoClassName( 0 ), 0 );
-  mAnnotationClassCombo->addItem( classColorIcon( annotationColor( 1 ) ), photoClassName( 1 ), 1 );
+  for ( int classId = 0; classId < sPhotoProblemClassCount; ++classId )
+    mAnnotationClassCombo->addItem( classColorIcon( annotationColor( classId ) ), photoClassName( classId ), classId );
   mAnnotationClassCombo->setIconSize( QSize( 14, 14 ) );
   annotationLayout->addWidget( mAnnotationClassCombo );
      mManualDrawButton = new QPushButton( tr( "标绘图斑" ), annotationPanel );
@@ -1256,8 +1389,20 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       QListWidgetItem *item = mPhotoList->item( row );
       auto *entry = item ? dynamic_cast<PhotoListEntryWidget *>( mPhotoList->itemWidget( item ) ) : nullptr;
       if ( entry )
+      {
         entry->setChecked( checked );
+        const int index = item->data( Qt::UserRole ).toInt();
+        if ( index >= 0 && index < mPhotos.size() )
+        {
+          const QString key = photoSelectionKey( mPhotos.at( index ) );
+          if ( checked )
+            mCheckedPhotoPaths.insert( key );
+          else
+            mCheckedPhotoPaths.remove( key );
+        }
+      }
     }
+    updateSelectAllCheckBoxState();
   } );
 
   QLabel *selectLabel = new QLabel( tr( "全选" ), photoListHeader );
@@ -1277,7 +1422,19 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       QListWidgetItem *item = mPhotoList->item( row );
       auto *entry = item ? dynamic_cast<PhotoListEntryWidget *>( mPhotoList->itemWidget( item ) ) : nullptr;
       if ( entry )
-        entry->setChecked( !entry->isChecked() );
+      {
+        const bool checked = !entry->isChecked();
+        entry->setChecked( checked );
+        const int index = item->data( Qt::UserRole ).toInt();
+        if ( index >= 0 && index < mPhotos.size() )
+        {
+          const QString key = photoSelectionKey( mPhotos.at( index ) );
+          if ( checked )
+            mCheckedPhotoPaths.insert( key );
+          else
+            mCheckedPhotoPaths.remove( key );
+        }
+      }
     }
     updateSelectAllCheckBoxState();
   } );
@@ -1300,6 +1457,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   mFusedList->setIconSize( QSize( sPhotoThumbnailExtent, 64 ) );
   mFusedList->setSelectionMode( QAbstractItemView::SingleSelection );
   mFusedList->setMinimumWidth( 300 );
+  mFusedList->setHorizontalScrollBarPolicy( Qt::ScrollBarAlwaysOff );
 
   QWidget *fusedPreviewPanel = new QWidget( fusedSplitter );
   QVBoxLayout *fusedPreviewLayout = new QVBoxLayout( fusedPreviewPanel );
@@ -1496,7 +1654,12 @@ void QgsEcoPhotoWorkbench::reloadIndex()
 {
   mPhotos.clear();
   mCheckedPhotoPaths.clear();
-  ++mThumbnailGeneration;
+  mThumbnailRequests.clear();
+  mDisplayedPhotoPath.clear();
+  mRequestedPhotoIndex = -1;
+  mRequestedFusedIndex = -1;
+  ++mPhotoPreviewRequest;
+  ++mFusedPreviewRequest;
   if ( mPhotoList )
     mPhotoList->clear();
   if ( mFusedList )
@@ -1609,14 +1772,14 @@ void QgsEcoPhotoWorkbench::reloadIndex()
   updateSummary();
 }
 
-void QgsEcoPhotoWorkbench::saveIndex() const
+bool QgsEcoPhotoWorkbench::saveIndex() const
 {
   if ( mWorkspacePath.isEmpty() )
-    return;
+    return false;
 
   const QString photosDirectory = QDir( mWorkspacePath ).filePath( QStringLiteral( "photos" ) );
   if ( !ensureDirectory( photosDirectory ) )
-    return;
+    return false;
 
   QJsonArray photosArray;
   for ( const PhotoRecord &record : mPhotos )
@@ -1660,11 +1823,11 @@ void QgsEcoPhotoWorkbench::saveIndex() const
 
   QSaveFile file( photoIndexFilePath( mWorkspacePath ) );
   if ( !file.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
-    return;
+    return false;
   const QByteArray serialized = QJsonDocument( root ).toJson( QJsonDocument::Indented );
   if ( file.write( serialized ) != serialized.size() )
-    return;
-  file.commit();
+    return false;
+  return file.commit();
 }
 
 void QgsEcoPhotoWorkbench::scheduleIndexSave()
@@ -1683,7 +1846,7 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
   if ( !mPhotoList )
     return;
 
-  ++mThumbnailGeneration;
+  mThumbnailRequests.clear();
   const int previousIndex = mPhotoList->currentRow();
   const QSignalBlocker blocker( mPhotoList );
   mPhotoList->clear();
@@ -1691,7 +1854,7 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
   {
     QListWidgetItem *item = new QListWidgetItem();
     item->setData( Qt::UserRole, index );
-    item->setSizeHint( QSize( 300, 132 ) );
+    item->setSizeHint( QSize( 0, 148 ) );
     mPhotoList->addItem( item );
     auto *entry = new PhotoListEntryWidget( mPhotoList, true );
     entry->onClicked( [this, index] {
@@ -1710,37 +1873,52 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
     } );
     entry->setChecked( mCheckedPhotoPaths.contains( photoSelectionKey( mPhotos.at( index ) ) ) );
     mPhotoList->setItemWidget( item, entry );
-    updatePhotoListItem( index, mPhotos.size() <= 60 );
+    updatePhotoListItem( index, true );
   }
   if ( !mPhotos.isEmpty() )
     mPhotoList->setCurrentRow( std::clamp( previousIndex, 0, static_cast<int>( mPhotos.size() ) - 1 ) );
   syncListEntrySelectionState( mPhotoList );
   updateSelectAllCheckBoxState();
 
-  if ( mPhotos.size() > 60 )
-    scheduleThumbnailLoading();
   showSelectedPhoto();
   rebuildFusedList();
 }
-void QgsEcoPhotoWorkbench::scheduleThumbnailLoading()
+void QgsEcoPhotoWorkbench::queueThumbnail( const QString &path, QWidget *entry )
 {
-  if ( !mPhotoList || mPhotos.isEmpty() )
+  if ( path.isEmpty() || !entry )
     return;
+  mThumbnailRequests.enqueue( qMakePair( path, QPointer<QWidget>( entry ) ) );
+  loadNextThumbnail();
+}
 
-  const quint64 generation = mThumbnailGeneration;
-  auto loadBatch = std::make_shared<std::function<void( int )>>();
-  *loadBatch = [this, generation, loadBatch]( int startIndex ) {
-    if ( !mPhotoList || generation != mThumbnailGeneration )
-      return;
-
-    const int endIndex = std::min( startIndex + 12, static_cast<int>( mPhotos.size() ) );
-    for ( int index = startIndex; index < endIndex; ++index )
-      updatePhotoListItem( index, true );
-
-    if ( endIndex < mPhotos.size() )
-      QTimer::singleShot( 0, this, [loadBatch, endIndex] { ( *loadBatch )( endIndex ); } );
-  };
-  QTimer::singleShot( 0, this, [loadBatch] { ( *loadBatch )( 0 ); } );
+void QgsEcoPhotoWorkbench::loadNextThumbnail()
+{
+  if ( mThumbnailWatcher )
+    return;
+  while ( !mThumbnailRequests.isEmpty() )
+  {
+    const auto request = mThumbnailRequests.dequeue();
+    if ( !request.second )
+      continue;
+    auto *watcher = new QFutureWatcher<QImage>( this );
+    mThumbnailWatcher = watcher;
+    connect( watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, entry = request.second] {
+      const QImage image = watcher->result();
+      if ( entry && !image.isNull() )
+      {
+        if ( auto *card = dynamic_cast<PhotoListEntryWidget *>( entry.data() ) )
+          card->setThumbnail( QPixmap::fromImage( image ) );
+      }
+      mThumbnailWatcher = nullptr;
+      watcher->deleteLater();
+      cleanupObsoleteFusedPhotos();
+      loadNextThumbnail();
+    } );
+    watcher->setFuture( QtConcurrent::run( [path = request.first] {
+      return readPreviewImage( path, QSize( sPhotoThumbnailExtent, sPhotoThumbnailExtent ) );
+    } ) );
+    return;
+  }
 }
 
 void QgsEcoPhotoWorkbench::showSelectedPhoto()
@@ -1756,6 +1934,8 @@ void QgsEcoPhotoWorkbench::showSelectedFusedPhoto()
     return;
   QListWidgetItem *item = mFusedList->currentItem();
   const int index = item ? item->data( Qt::UserRole ).toInt() : -1;
+  mRequestedFusedIndex = index;
+  ++mFusedPreviewRequest;
   if ( index < 0 || index >= mPhotos.size() || mPhotos.at( index ).fusedPath.isEmpty() )
   {
     mFusedPreview->setImage( QImage(), {} );
@@ -1764,15 +1944,14 @@ void QgsEcoPhotoWorkbench::showSelectedFusedPhoto()
     return;
   }
 
-  const PhotoRecord &record = mPhotos.at( index );
-  const QImage image = readPreviewImage( record.fusedPath );
-  mFusedPreview->setImage( image, {} );
-  if ( mFusedMetadataLabel )
-    mFusedMetadataLabel->setText( photoPreviewInfoHtml( record.fusedPath, image, record ) );
+  mFusedPreview->setImage( QImage(), {} );
+  loadPreviewImage( true );
 }
 
 void QgsEcoPhotoWorkbench::showPhotoAt( int index )
 {
+  mRequestedPhotoIndex = index;
+  ++mPhotoPreviewRequest;
   if ( mEditAnnotationButton && mEditAnnotationButton->isChecked() )
   {
     const QSignalBlocker blocker( mEditAnnotationButton );
@@ -1786,15 +1965,88 @@ void QgsEcoPhotoWorkbench::showPhotoAt( int index )
       mPreview->setImage( QImage(), {} );
     if ( mMetadataLabel )
       mMetadataLabel->setText( tr( "未选择照片" ) );
+    mDisplayedPhotoPath.clear();
     return;
   }
 
   const PhotoRecord &record = mPhotos.at( index );
   const QString source = photoSourcePath( record );
-  const QImage image = readPreviewImage( source );
-  mPreview->setImage( image, record.annotations );
-  if ( mMetadataLabel )
-    mMetadataLabel->setText( photoPreviewInfoHtml( source, image, record ) );
+  if ( mDisplayedPhotoPath == source )
+  {
+    mPreview->setAnnotations( record.annotations );
+    return;
+  }
+  mDisplayedPhotoPath.clear();
+  mPreview->setImage( QImage(), {} );
+  loadPreviewImage( false );
+}
+
+void QgsEcoPhotoWorkbench::loadPreviewImage( bool fused )
+{
+  if ( fused && mCreatingFusion )
+    return;
+  if ( fused ? bool( mFusedPreviewWatcher ) : bool( mPhotoPreviewWatcher ) )
+    return;
+  const int index = fused ? mRequestedFusedIndex : mRequestedPhotoIndex;
+  if ( index < 0 || index >= mPhotos.size() )
+    return;
+  const QString path = fused ? mPhotos.at( index ).fusedPath : photoSourcePath( mPhotos.at( index ) );
+  if ( path.isEmpty() )
+    return;
+  const quint64 context = mContextGeneration;
+  const quint64 request = fused ? mFusedPreviewRequest : mPhotoPreviewRequest;
+  auto *watcher = new QFutureWatcher<QImage>( this );
+  if ( fused )
+    mFusedPreviewWatcher = watcher;
+  else
+    mPhotoPreviewWatcher = watcher;
+  connect( watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, fused, index, path, context, request] {
+    const QImage image = watcher->result();
+    if ( fused )
+      mFusedPreviewWatcher = nullptr;
+    else
+      mPhotoPreviewWatcher = nullptr;
+    watcher->deleteLater();
+    cleanupObsoleteFusedPhotos();
+    if ( context != mContextGeneration || request != ( fused ? mFusedPreviewRequest : mPhotoPreviewRequest ) )
+    {
+      loadPreviewImage( fused );
+      return;
+    }
+    if ( index < 0 || index >= mPhotos.size() )
+      return;
+    const PhotoRecord &record = mPhotos.at( index );
+    if ( path != ( fused ? record.fusedPath : photoSourcePath( record ) ) )
+      return;
+    EcoPhotoAnnotationView *preview = fused ? mFusedPreview : mPreview;
+    if ( preview )
+      preview->setImage( image, fused ? QVector<Annotation>() : record.annotations );
+    if ( !fused && !image.isNull() )
+      mDisplayedPhotoPath = path;
+    QLabel *metadata = fused ? mFusedMetadataLabel : mMetadataLabel;
+    if ( metadata )
+      metadata->setText( photoPreviewInfoHtml( path, image, record ) );
+  } );
+  watcher->setFuture( QtConcurrent::run( [path] { return readPreviewImage( path ); } ) );
+}
+
+void QgsEcoPhotoWorkbench::cleanupObsoleteFusedPhotos()
+{
+  // Image decoders own their file handles until the background task finishes.
+  // Retire previous derived outputs only after all preview reads have finished.
+  if ( mCreatingFusion || mThumbnailWatcher || mPhotoPreviewWatcher || mFusedPreviewWatcher )
+    return;
+  for ( auto it = mObsoleteFusedPaths.begin(); it != mObsoleteFusedPaths.end(); )
+  {
+    const QString path = *it;
+    const bool referenced = std::any_of( mPhotos.cbegin(), mPhotos.cend(), [&path]( const PhotoRecord &record ) {
+      return record.fusedPath == path || record.sourcePath == path;
+    } );
+    if ( !referenced && ( !QFileInfo::exists( path ) || QFile::remove( path ) ) )
+      it = mObsoleteFusedPaths.erase( it );
+    else
+      ++it;
+  }
 }
 void QgsEcoPhotoWorkbench::updatePhotoListItem( int index, bool loadThumbnail )
 {
@@ -1829,17 +2081,10 @@ void QgsEcoPhotoWorkbench::updatePhotoListItem( int index, bool loadThumbnail )
   const PhotoAnnotationStats stats = photoAnnotationStats( record );
   const QString source = photoSourcePath( record );
   const QFileInfo info( source );
-  QPixmap thumbnail( sPhotoThumbnailExtent, 64 );
-  thumbnail.fill( QColor( QStringLiteral( "#253142" ) ) );
   if ( loadThumbnail )
-  {
-    const QImage thumbnailImage = readPreviewImage( source, QSize( sPhotoThumbnailExtent, 64 ) );
-    if ( !thumbnailImage.isNull() )
-      thumbnail = QPixmap::fromImage( thumbnailImage );
-  }
-  entry->setThumbnail( thumbnail );
+    queueThumbnail( source, entry );
   entry->setName( info.fileName() );
-  entry->setSubtitle( QString() );
+  entry->setSubtitle( photoItemStatusHtml( record ) );
   entry->setStateHtml( QString() );
   entry->setAccentColor( photoCardAccentColor( record ) );
   entry->setInfo( photoItemInfoHtml( record ) );
@@ -1865,7 +2110,7 @@ void QgsEcoPhotoWorkbench::rebuildFusedList()
       firstRow = row;
     QListWidgetItem *item = new QListWidgetItem();
     item->setData( Qt::UserRole, index );
-    item->setSizeHint( QSize( 300, 132 ) );
+    item->setSizeHint( QSize( 0, 148 ) );
     mFusedList->addItem( item );
     auto *entry = new PhotoListEntryWidget( mFusedList, false );
     entry->setCheckable( false );
@@ -1883,7 +2128,7 @@ void QgsEcoPhotoWorkbench::rebuildFusedList()
       }
     } );
     mFusedList->setItemWidget( item, entry );
-    updateFusedListItem( index, mPhotos.size() <= 60 );
+    updateFusedListItem( index, true );
     ++row;
   }
   if ( mFusedList->count() > 0 )
@@ -1915,18 +2160,10 @@ void QgsEcoPhotoWorkbench::updateFusedListItem( int index, bool loadThumbnail )
     return;
   const PhotoRecord &record = mPhotos.at( index );
   const PhotoAnnotationStats stats = photoAnnotationStats( record );
-  const QFileInfo info( record.fusedPath );
-  QPixmap thumbnail( sPhotoThumbnailExtent, 64 );
-  thumbnail.fill( QColor( QStringLiteral( "#253142" ) ) );
   if ( loadThumbnail )
-  {
-    const QImage thumbnailImage = readPreviewImage( record.fusedPath, QSize( sPhotoThumbnailExtent, 64 ) );
-    if ( !thumbnailImage.isNull() )
-      thumbnail = QPixmap::fromImage( thumbnailImage );
-  }
-  entry->setThumbnail( thumbnail );
-  entry->setName( info.fileName() );
-  entry->setSubtitle( QString() );
+    queueThumbnail( record.fusedPath, entry );
+  entry->setName( fusedOutputFileName( record.sourcePath, index ) );
+  entry->setSubtitle( photoItemStatusHtml( record ) );
   entry->setStateHtml( QString() );
   entry->setAccentColor( photoCardAccentColor( record ) );
   entry->setInfo( photoItemInfoHtml( record ) );
@@ -1987,7 +2224,7 @@ void QgsEcoPhotoWorkbench::setBusy( bool busy, const QString &status )
 {
   mBusy = busy;
   const bool controlsEnabled = !busy && !mPhaseId.isEmpty();
-  const QList<QPushButton *> buttons = { mImportButton, mRemoveButton, mManualDrawButton, mPhotoSmartSegmentationButton, mPhotoRecognitionButton, mDeleteAnnotationButton,
+  const QList<QPushButton *> buttons = { mImportButton, mRemoveButton, mManualDrawButton, mPhotoSmartSegmentationButton, mPhotoRecognitionButton, mDeleteAnnotationButton, mEditAnnotationButton,
                                          mCreateFusionButton, mExportOriginalButton, mExportFusedButton, mExportYoloButton };
   for ( QPushButton *button : buttons )
   {
@@ -2000,6 +2237,8 @@ void QgsEcoPhotoWorkbench::setBusy( bool busy, const QString &status )
     mPhotoList->setEnabled( !busy );
   if ( mFusedList )
     mFusedList->setEnabled( !busy );
+  if ( mSelectAllCheckBox )
+    mSelectAllCheckBox->setEnabled( controlsEnabled );
   if ( mStatusLabel && !status.isEmpty() )
     mStatusLabel->setText( status );
   if ( mProgressBar )
@@ -2384,9 +2623,11 @@ void QgsEcoPhotoWorkbench::batchRecognizePhotos()
       return;
     }
 
+    // rebuildPhotoList() refreshes the fused list as part of the same model
+    // update. Calling rebuildFusedList() again starts duplicate thumbnail and
+    // preview work, which is especially expensive after a second fusion.
     mPhotos = result.records;
     rebuildPhotoList();
-    rebuildFusedList();
     saveIndex();
     updateSummary();
     setTaskProgress( 100, 100, tr( "智能识别完成" ) );
@@ -2469,7 +2710,7 @@ void QgsEcoPhotoWorkbench::batchRecognizePhotos()
 
         Annotation annotation;
         annotation.classId = detection.classId;
-        annotation.className = detection.classId == 0 ? photoClassName( 0 ) : detection.classId == 1 ? photoClassName( 1 ) : QStringLiteral( "类别_%1" ).arg( detection.classId );
+        annotation.className = photoClassName( detection.classId );
         annotation.source = QStringLiteral( "auto" );
         annotation.normalizedPolygon = normalized;
         updatedAnnotations.append( annotation );
@@ -2496,6 +2737,12 @@ void QgsEcoPhotoWorkbench::setManualDrawingEnabled( bool enabled )
     return;
   }
 
+  if ( enabled && mPhotoSmartSegmentationButton && mPhotoSmartSegmentationButton->isChecked() )
+  {
+    const QSignalBlocker blocker( mPhotoSmartSegmentationButton );
+    mPhotoSmartSegmentationButton->setChecked( false );
+    setPhotoSmartSegmentationEnabled( false );
+  }
   if ( enabled && mDeleteAnnotationButton && mDeleteAnnotationButton->isChecked() )
   {
     const QSignalBlocker blocker( mDeleteAnnotationButton );
@@ -2518,6 +2765,12 @@ void QgsEcoPhotoWorkbench::setDeleteAnnotationEnabled( bool enabled )
   if ( !mPreview || !mDeleteAnnotationButton )
     return;
 
+  if ( enabled && mPhotoSmartSegmentationButton && mPhotoSmartSegmentationButton->isChecked() )
+  {
+    const QSignalBlocker blocker( mPhotoSmartSegmentationButton );
+    mPhotoSmartSegmentationButton->setChecked( false );
+    setPhotoSmartSegmentationEnabled( false );
+  }
   if ( enabled && mManualDrawButton && mManualDrawButton->isChecked() )
   {
     const QSignalBlocker blocker( mManualDrawButton );
@@ -2700,16 +2953,6 @@ void QgsEcoPhotoWorkbench::createFusedPhotos()
     return;
   }
 
-  bool hasCheckedPhoto = false;
-  for ( const PhotoRecord &record : std::as_const( mPhotos ) )
-  {
-    if ( mCheckedPhotoPaths.contains( photoSelectionKey( record ) ) )
-    {
-      hasCheckedPhoto = true;
-      break;
-    }
-  }
-  Q_UNUSED( hasCheckedPhoto );
   QVector<int> targetIndexes;
   QSet<int> indexSet;
   if ( mPhotoList )
@@ -2755,49 +2998,85 @@ void QgsEcoPhotoWorkbench::createFusedPhotos()
   }
   if ( targetIndexes.isEmpty() )
   {
-    notify( tr( "移除照片" ), tr( "请先勾选要移除的照片。" ), true );
-
-
+    notify( tr( "生成融合照片" ), tr( "请先勾选要生成融合照片的照片。" ), true );
     return;
   }
 
   const QString outputDirectory = photoDerivedDirectory( mWorkspacePath );
   if ( !ensureDirectory( outputDirectory ) )
   {
-    notify( tr( "移除照片" ), tr( "无法创建照片输出目录，请检查工作区权限。" ), true );
+    notify( tr( "生成融合照片" ), tr( "无法创建照片输出目录，请检查工作区权限。" ), true );
     return;
   }
 
+  if ( mEditAnnotationButton && mEditAnnotationButton->isChecked() )
+    mEditAnnotationButton->setChecked( false );
+  mCreatingFusion = true;
+  ++mFusedPreviewRequest;
+  if ( mFusedPreview )
+    mFusedPreview->setImage( QImage(), {} );
   setBusy( true, tr( "正在生成融合照片..." ) );
-  setTaskProgress( 0, 100, tr( "生成进度：0%" ) );
+  setTaskProgress( 0, 100, tr( "生成进度：0% · 正在处理第 1 / %1 张" ).arg( targetIndexes.size() ) );
   const quint64 generation = mContextGeneration;
   const QVector<PhotoRecord> records = mPhotos;
+  const QString batchId = QUuid::createUuid().toString( QUuid::WithoutBraces );
   auto *watcher = new QFutureWatcher<PhotoBatchResult>( this );
   connect( watcher, &QFutureWatcher<PhotoBatchResult>::progressValueChanged, this, [this]( int progress ) {
     const int percent = std::clamp( progress, 0, 100 );
-    setTaskProgress( percent, 100, tr( "生成进度：%1%" ).arg( percent ) );
+    setTaskProgress( percent, 100, QString() );
+  } );
+  connect( watcher, &QFutureWatcher<PhotoBatchResult>::progressTextChanged, this, [this]( const QString &text ) {
+    if ( mStatusLabel )
+      mStatusLabel->setText( text );
   } );
   connect( watcher, &QFutureWatcher<PhotoBatchResult>::finished, this, [this, watcher, generation] {
     const PhotoBatchResult result = watcher->result();
     watcher->deleteLater();
-      if ( generation != mContextGeneration )
+    mCreatingFusion = false;
+    if ( generation != mContextGeneration )
     {
-       setBusy( false, tr( "融合照片生成结果已过期，已忽略。" ) );
+      setBusy( false, tr( "融合照片生成结果已过期，已忽略。" ) );
       return;
     }
 
+    QSet<QString> replacedPaths;
+    const QString derivedDirectory = QDir::cleanPath( photoDerivedDirectory( mWorkspacePath ) );
+    for ( int index = 0; index < mPhotos.size() && index < result.records.size(); ++index )
+    {
+      const QString previousPath = mPhotos.at( index ).fusedPath;
+      if ( !previousPath.isEmpty() && previousPath != result.records.at( index ).fusedPath
+           && QDir::cleanPath( QFileInfo( previousPath ).absolutePath() ) == derivedDirectory )
+        replacedPaths.insert( previousPath );
+    }
     mPhotos = result.records;
-    rebuildPhotoList();
+    // The original cards keep their checkboxes, thumbnails and scroll position.
+    // Rebuild only derived cards once all image writes are complete.
+    for ( int index = 0; index < mPhotos.size(); ++index )
+      updatePhotoListItem( index );
+    // Keep outputs referenced by the on-disk index if persisting the new
+    // generation fails. They must remain available when the project reopens.
+    const bool indexSaved = saveIndex();
+    if ( indexSaved )
+      mObsoleteFusedPaths.unite( replacedPaths );
     rebuildFusedList();
-    saveIndex();
+    cleanupObsoleteFusedPhotos();
     updateSummary();
     if ( result.written > 0 && mPhotoTabs )
       mPhotoTabs->setCurrentIndex( 1 );
-    setTaskProgress( 100, 100, tr( "融合照片生成完成" ) );
-    setBusy( false, tr( "融合照片生成完成：%1 张，跳过 %2 张。" ).arg( result.written ).arg( result.skipped ) );
-    notify( tr( "融合照片生成完成" ), tr( "已生成 %1 张融合照片。" ).arg( result.written ) );
+    const QString status = indexSaved
+                             ? tr( "融合照片生成完成：%1 张，跳过 %2 张。" ).arg( result.written ).arg( result.skipped )
+                             : tr( "融合照片已生成，但照片索引保存失败。已保留旧融合文件，请检查工作区权限与磁盘空间。" );
+    setBusy( false, status );
+    if ( mProgressBar )
+      mProgressBar->setValue( 100 );
+    setTaskProgress( 100, 100, status );
+    QTimer::singleShot( 3000, this, [this, generation] {
+      if ( !mBusy && generation == mContextGeneration && mProgressBar && mProgressBar->value() == 100 )
+        mProgressBar->hide();
+    } );
+    notify( tr( "融合照片生成完成" ), indexSaved ? tr( "已生成 %1 张融合照片。" ).arg( result.written ) : status, !indexSaved );
   } );
-  watcher->setFuture( QtConcurrent::run( [records, targetIndexes, outputDirectory]( QPromise<PhotoBatchResult> &promise ) {
+  watcher->setFuture( QtConcurrent::run( [records, targetIndexes, outputDirectory, batchId]( QPromise<PhotoBatchResult> &promise ) {
     PhotoBatchResult result;
     result.records = records;
     ensureDirectory( outputDirectory );
@@ -2806,6 +3085,9 @@ void QgsEcoPhotoWorkbench::createFusedPhotos()
     promise.setProgressValue( 0 );
     for ( int pos = 0; pos < targetIndexes.size(); ++pos )
     {
+      promise.setProgressValueAndText( ( pos * 100 ) / total,
+                                      QStringLiteral( "生成进度：%1% · 正在处理第 %2 / %3 张" )
+                                        .arg( ( pos * 100 ) / total ).arg( pos + 1 ).arg( total ) );
       const int index = targetIndexes.at( pos );
       if ( index < 0 || index >= result.records.size() )
       {
@@ -2814,6 +3096,12 @@ void QgsEcoPhotoWorkbench::createFusedPhotos()
         continue;
       }
       PhotoRecord &record = result.records[index];
+      if ( record.annotations.isEmpty() )
+      {
+        ++result.skipped;
+        promise.setProgressValue( ( ( pos + 1 ) * 100 ) / total );
+        continue;
+      }
       QImage image = readPreviewImage( record.sourcePath, QSize() );
       if ( image.isNull() )
       {
@@ -2841,10 +3129,13 @@ void QgsEcoPhotoWorkbench::createFusedPhotos()
       }
       painter.end();
 
-      const QString targetPath = QDir( outputDirectory ).filePath( QStringLiteral( "%1_%2_fused.png" )
+      // Each generation gets a new path, so an old preview can never block a
+      // Windows replacement operation or read a partially encoded PNG.
+      const QString targetPath = QDir( outputDirectory ).filePath( QStringLiteral( "%1_%2_%3_fused.png" )
                                                                      .arg( safeOutputBaseName( record.sourcePath, index ) )
-                                                                     .arg( index + 1, 5, 10, QLatin1Char( '0' ) ) );
-      if ( image.save( targetPath, "PNG" ) )
+                                                                     .arg( index + 1, 5, 10, QLatin1Char( '0' ) )
+                                                                     .arg( batchId ) );
+      if ( saveImageAtomically( image, targetPath, "PNG" ) )
       {
         record.fusedPath = targetPath;
         result.outputPaths.append( targetPath );
@@ -2909,7 +3200,7 @@ void QgsEcoPhotoWorkbench::exportFusedPhotos()
         ++result.skipped;
         continue;
       }
-      const QString targetPath = indexedOutputPath( outputDirectory, record.fusedPath, i, QStringLiteral( "_fused" ) );
+      const QString targetPath = QDir( outputDirectory ).filePath( fusedOutputFileName( record.sourcePath, i ) );
       if ( copyFileReplacingTarget( record.fusedPath, targetPath ) )
       {
         ++result.written;
@@ -3022,7 +3313,8 @@ void QgsEcoPhotoWorkbench::exportYoloSamples()
     if ( classesFile.open( QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text ) )
     {
       QTextStream stream( &classesFile );
-      stream << photoClassName( 0 ) << '\n' << photoClassName( 1 ) << '\n';
+      for ( int classId = 0; classId < sPhotoProblemClassCount; ++classId )
+        stream << photoClassName( classId ) << '\n';
     }
     return result;
   } ) );

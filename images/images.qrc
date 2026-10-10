@@ -265,6 +265,8 @@
         <file>themes/default/mActionArrowLeft.svg</file>
         <file>themes/default/mActionArrowRight.svg</file>
         <file>themes/default/mActionArrowUp.svg</file>
+        <file>themes/default/ecoTreeBranchClosed.svg</file>
+        <file>themes/default/ecoTreeBranchOpen.svg</file>
         <file>themes/default/mActionAtlasFirst.svg</file>
         <file>themes/default/mActionAtlasLast.svg</file>
         <file>themes/default/mActionAtlasNext.svg</file>

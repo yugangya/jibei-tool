@@ -1,4 +1,4 @@
-***************************************************************************
+/***************************************************************************
   qgsecorestorationcontroller.h
   --------------------------------------
   Native environmental restoration workflow for the desktop application.
@@ -70,6 +70,7 @@ class QgsEcoRestorationController final : public QObject
     QWidget *createProjectPage();
     QWidget *createDataPage();
     QWidget *createRecognitionPage();
+    QWidget *createSmartSegmentationPage();
     QWidget *createReviewPage();
     QWidget *createPhotoPage();
     QWidget *createScreenshotPage();
@@ -98,7 +99,7 @@ class QgsEcoRestorationController final : public QObject
     void runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString() );
     void runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId );
     void runRecognitionLegacy( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString() );
-    QgsVectorLayer *createResultLayer( bool restoration = false, bool notify = true, const QString &phaseId = QString() );
+    QgsVectorLayer *createResultLayer( bool restoration = false, bool notify = true, const QString &phaseId = QString(), const QString &recognitionMode = QString() );
     QgsVectorLayer *createSmartSegmentationLayer( const QString &layerName, const QgsCoordinateReferenceSystem &crs, bool notify = false );
     void startAddingPolygon();
     void startVertexEditing();
@@ -114,7 +115,7 @@ class QgsEcoRestorationController final : public QObject
     QVector<QgsRectangle> towerRecognitionExtents( QgsVectorLayer *towerLayer, const QgsCoordinateReferenceSystem &targetCrs, QStringList *labels = nullptr ) const;
     void updateRecognitionPreview();
     void clearRecognitionPreview();
-    QgsVectorLayer *ensureDisturbanceResultLayer( const QString &phaseId = QString() );
+    QgsVectorLayer *ensureDisturbanceResultLayer( const QString &phaseId = QString(), const QString &recognitionMode = QString() );
     void attachRecognitionResultLayer( QgsVectorLayer *layer );
     void setRecognitionProgress( int current, int total );
     void showRecognitionResultTable( const QString &resultLayerId );
@@ -124,7 +125,7 @@ class QgsEcoRestorationController final : public QObject
     bool focusRecognitionResultRow( int row, double scale = 1250.0 );
     void editRecognitionResultForRow( int row );
     void addRecognitionResultForRow( int row );
-    void finishRecognitionResultForRow( int row );
+    void finishRecognitionResultForFeature( const QString &layerId, qint64 featureId );
     void deleteRecognitionResultForRow( int row );
     void setRecognitionResultVisibilityForRow( int row, bool visible );
     void finishRecognitionEditing( QgsVectorLayer *layer );
@@ -137,6 +138,11 @@ class QgsEcoRestorationController final : public QObject
     void startSmartSegmentationForLayer( const QString &layerId );
     void previewSmartSegmentationPrompt( const QVector<QgsPointXY> &canvasPoints, const QVector<int> &promptLabels );
     void commitSmartSegmentationPreview();
+    void showSmartSegmentationClassificationPanel();
+    void hideSmartSegmentationClassificationPanel();
+    void commitSmartSegmentationClassified();
+    void deleteSmartSegmentationPendingFeature();
+    QgsVectorLayer *ensureSmartSegmentationProblemLayer( const QString &problemKey );
     void leaveSmartSegmentationTool();
 
     void ensureBusinessGroups();
@@ -194,6 +200,7 @@ class QgsEcoRestorationController final : public QObject
     QPointer<QgsMapToolExtent> mRecognitionExtentTool;
     QPointer<QgsMapTool> mRecognitionPreviousMapTool;
     QPointer<QgsDockWidget> mRecognitionDock;
+    QPointer<QgsDockWidget> mSmartSegmentationDock;
     QPointer<QgsDockWidget> mPhotoDock;
     QPointer<QAction> mRecognitionPanelAction;
     QPointer<QAction> mExtentRecognitionAction;
@@ -217,13 +224,22 @@ class QgsEcoRestorationController final : public QObject
     bool mProjectStateRefreshPending = false;
     bool mLayerImportInProgress = false;
     QString mRecognitionEditingTowerLabel;
+    QString mRecognitionEditingLayerId;
+    qint64 mRecognitionEditingFeatureId = -1;
     QString mManualTowerDrawingLayerId;
     QPointer<QAction> mSmartSegmentationAction;
     QPointer<QgsMapTool> mSmartSegmentationTool;
     QPointer<QgsMapTool> mSmartSegmentationPreviousMapTool;
     QPointer<QgsRubberBand> mSmartSegmentationPreview;
+    QPointer<QLabel> mSmartSegmentationStatusLabel;
+    QPointer<QWidget> mSmartSegmentationClassificationPanel;
+    QPointer<QComboBox> mSmartSegmentationProblemTypeCombo;
+    QPointer<QPushButton> mSmartSegmentationCompleteButton;
+    QPointer<QPushButton> mSmartSegmentationDeleteButton;
     QgsGeometry mSmartSegmentationPendingGeometry;
     double mSmartSegmentationPendingScore = 0.0;
+    QString mSmartSegmentationPendingPhaseId;
+    QString mSmartSegmentationPendingRasterLayerId;
     QString mSmartSegmentationRequestedLayerId;
     QString mSmartSegmentationTargetLayerId;
     qint64 mSmartSegmentationFeatureId = -1;
