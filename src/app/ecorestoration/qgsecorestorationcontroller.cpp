@@ -45,6 +45,7 @@
 #include "qgsmapsettings.h"
 #include "qgspallabeling.h"
 #include "qgsproject.h"
+#include "qgspythonrunner.h"
 #include "qgsproperty.h"
 #include "qgsrasterblock.h"
 #include "qgsrasterdataprovider.h"
@@ -120,6 +121,7 @@
 #include <QPushButton>
 #include <QPropertyAnimation>
 #include <QRegularExpression>
+#include <QResizeEvent>
 #include <QSet>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -664,6 +666,7 @@ namespace
         setObjectName( QStringLiteral( "EcoDockTitleBar" ) );
         setFixedHeight( 31 );
         setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Fixed );
+        setAttribute( Qt::WA_OpaquePaintEvent );
         setAutoFillBackground( true );
         QPalette titlePalette = palette();
         titlePalette.setColor( QPalette::Window, QColor( QStringLiteral( "#181818" ) ) );
@@ -717,6 +720,20 @@ namespace
       }
 
     protected:
+      void paintEvent( QPaintEvent * ) override
+      {
+        QPainter painter( this );
+        painter.fillRect( rect(), QColor( QStringLiteral( "#181818" ) ) );
+      }
+
+      void resizeEvent( QResizeEvent *event ) override
+      {
+        QWidget::resizeEvent( event );
+        // Moving the caption buttons must also clear their previous position.
+        // Repaint the whole caption instead of retaining a resized backing store.
+        update();
+      }
+
       void mousePressEvent( QMouseEvent *event ) override { event->ignore(); }
       void mouseMoveEvent( QMouseEvent *event ) override { event->ignore(); }
       void mouseReleaseEvent( QMouseEvent *event ) override { event->ignore(); }
@@ -738,10 +755,38 @@ namespace
 
   void installEcoDockTitleBar( QDockWidget *dock )
   {
-    if ( !dock || dock->property( "eco/title-bar-installed" ).toBool() )
+    if ( !dock )
+      return;
+    // A custom Qt caption owns the dock's controls. Native dock subcontrols and
+    // outer stylesheet margins must not reserve a second caption/frame.
+    dock->setStyleSheet( QStringLiteral( R"(
+      QDockWidget, QgsDockWidget { color:#d4d4d4; background:#1e1e1e; border:1px solid #3c3c3c; margin:0; padding:0; }
+    )" ) );
+    QPalette dockPalette = dock->palette();
+    for ( const QPalette::ColorGroup colorGroup : { QPalette::Active, QPalette::Inactive, QPalette::Disabled } )
+      dockPalette.setColor( colorGroup, QPalette::Window, QColor( QStringLiteral( "#1e1e1e" ) ) );
+    dock->setPalette( dockPalette );
+    dock->setAutoFillBackground( true );
+    dock->setAttribute( Qt::WA_StyledBackground );
+    if ( dock->property( "eco/title-bar-installed" ).toBool() )
       return;
     dock->setProperty( "eco/title-bar-installed", true );
     dock->setTitleBarWidget( new EcoDockTitleBar( dock ) );
+    QObject::connect( dock, &QDockWidget::topLevelChanged, dock, [dock]( bool ) {
+      // Qt reparents the dock while changing its floating state. Invalidate the
+      // previous host after that transition so no old dock pixels remain there.
+      QTimer::singleShot( 0, dock, [dock] {
+        if ( QMainWindow *mainWindow = qobject_cast<QMainWindow *>( dock->parentWidget() ) )
+        {
+          mainWindow->update();
+          if ( mainWindow->centralWidget() )
+            mainWindow->centralWidget()->update();
+        }
+        dock->update();
+        if ( dock->titleBarWidget() )
+          dock->titleBarWidget()->update();
+      } );
+    } );
   }
 
   void applyVsCodeNativeTitleBar( QWidget *window );
@@ -907,10 +952,11 @@ namespace
   {
     if ( !window || !window->isWindow() )
       return;
-    // A dock widget temporarily retains the Qt::Window flag while QMainWindow
-    // is docking it. Calling winId() in that state creates a non-top-level
-    // native window, which produces a white frame and a QWidgetWindow warning.
-    if ( QDockWidget *dock = qobject_cast<QDockWidget *>( window ); dock && !dock->isFloating() )
+    // QDockWidget manages its native surface while floating and reparenting.
+    // Forcing winId() from a Show event makes its child widgets/ancestors native,
+    // leaving stale captions and layer content when the dock moves or resizes.
+    // Custom dock captions are painted by Qt and need no DWM caption styling.
+    if ( qobject_cast<QDockWidget *>( window ) )
       return;
 #ifdef Q_OS_WIN
     using DwmSetWindowAttributeFunction = long( __stdcall * )( void *, unsigned int, const void *, unsigned int );
@@ -4179,6 +4225,9 @@ void QgsEcoRestorationController::createToolbar()
   QAction *screenshot = mToolbar->addAction( ecoToolbarIcon( EcoToolbarIcon::Screenshot ), tr( "批量截图" ) );
   QAction *showPanel = mToolbar->addAction( ecoToolbarIcon( EcoToolbarIcon::Panel ), tr( "业务面板" ) );
 
+  QAction *aiRemoteSensing = mToolbar->addAction( ecoToolbarIcon( EcoToolbarIcon::Panel ), QStringLiteral( "AI遥感助手" ) );
+  aiRemoteSensing->setToolTip( QStringLiteral( "打开 LibreGeoLens AI 遥感助手" ) );
+
   connect( newProject, &QAction::triggered, this, [this] { createBusinessProject(); } );
   connect( mPhaseCompareAction, &QAction::triggered, this, [this] { showPhaseComparisonDialog(); } );
   connect( addVector, &QAction::triggered, this, [this] { importVectors(); } );
@@ -4209,6 +4258,28 @@ void QgsEcoRestorationController::createToolbar()
   } );
   connect( showPanel, &QAction::triggered, mDock, &QgsDockWidget::show );
   connect( showPanel, &QAction::triggered, mDock, &QgsDockWidget::raise );
+  connect( aiRemoteSensing, &QAction::triggered, this, [this] {
+    if ( !QgsPythonRunner::isValid() )
+    {
+      showMessage( QStringLiteral( "AI遥感助手" ), QStringLiteral( "Python 支持当前不可用，无法打开 LibreGeoLens。" ), true );
+      return;
+    }
+
+    const QString command = QStringLiteral( R"PY(
+import qgis.utils as _jianghe_plugin_utils
+_jianghe_plugin_name = 'libre_geo_lens'
+if not _jianghe_plugin_utils.isPluginLoaded(_jianghe_plugin_name):
+    if not _jianghe_plugin_utils.loadPlugin(_jianghe_plugin_name):
+        raise RuntimeError('LibreGeoLens plugin could not be loaded')
+    if not _jianghe_plugin_utils.startPlugin(_jianghe_plugin_name):
+        raise RuntimeError('LibreGeoLens plugin could not be started')
+_jianghe_plugin = _jianghe_plugin_utils.plugins.get(_jianghe_plugin_name)
+if _jianghe_plugin is None or not hasattr(_jianghe_plugin, 'run'):
+    raise RuntimeError('LibreGeoLens plugin entry point is unavailable')
+_jianghe_plugin.run()
+)PY" );
+    QgsPythonRunner::run( command, QStringLiteral( "无法打开 LibreGeoLens AI 遥感助手。" ) );
+  } );
   connect( mExtentRecognitionAction, &QAction::toggled, this, [this]( bool enabled ) {
     if ( enabled )
       startExtentRecognition();
@@ -8440,6 +8511,9 @@ void QgsEcoRestorationController::setCompactMode( bool enabled )
     QStringLiteral( "EcoRecognitionResultDock" ),
     QStringLiteral( "EcoPhaseCompareLeftDock" ),
     QStringLiteral( "EcoPhaseCompareRightDock" ),
+    // LibreGeoLens is loaded on demand by the Jianghe AI assistant action.
+    // Keep its dock visible when the compact business layout is applied.
+    QStringLiteral( "JiangheLibreGeoLensDock" ),
     QStringLiteral( "Layers" )
   };
 

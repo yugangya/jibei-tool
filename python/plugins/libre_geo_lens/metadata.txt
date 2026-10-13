@@ -1,0 +1,10 @@
+[general]
+name=AI遥感助手（LibreGeoLens）
+description=使用本地 Ollama 或在线视觉模型分析地图与图片。
+about=独立的中文影像问答面板，支持流式回答、处理进度、多轮追问和模型设置，不修改江河系统业务图层。
+version=0.2.0
+qgisMinimumVersion=4.0
+author=Jianghe
+category=Plugins
+experimental=True
+tags=AI,Ollama,vision,remote sensing

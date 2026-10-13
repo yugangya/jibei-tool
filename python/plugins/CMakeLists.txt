@@ -55,5 +55,6 @@ endif()
 add_subdirectory(processing)
 add_subdirectory(grassprovider)
 add_subdirectory(MetaSearch)
+add_subdirectory(libre_geo_lens)
 
 PY_COMPILE(staged-plugins "${PYTHON_OUTPUT_DIRECTORY}/plugins")

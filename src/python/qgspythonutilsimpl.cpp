@@ -32,11 +32,25 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 
 using namespace Qt::StringLiterals;
+
+namespace
+{
+  QString pythonStringLiteral( const QString &value )
+  {
+    // JSON string escapes are also valid Python string escapes. Serialize only
+    // strings so Windows paths, quotes, Unicode and control characters survive
+    // source-code interpolation without becoming Python escape sequences.
+    const QByteArray serialized = QJsonDocument( QJsonArray { value } ).toJson( QJsonDocument::Compact );
+    return QString::fromUtf8( serialized.mid( 1, serialized.size() - 2 ) );
+  }
+}
 
 PyThreadState *_mainState = nullptr;
 
@@ -60,11 +74,7 @@ bool QgsPythonUtilsImpl::checkSystemImports()
   // it is very useful for cleaning sys.path, which may have undesirable paths, or for
   // isolating/loading the initial environ without requiring a virt env, e.g. homebrew or MacPorts installs on Mac
   runString( u"pyqgstart = os.getenv('PYQGIS_STARTUP')"_s );
-  runString(
-    QStringLiteral( R""""(
-exec(
-    compile(
-        """
+  const QString startupScript = QStringLiteral( R""""(
 class StartupScriptRunner:
     def __init__(self):
         self.info_messages: list[str] = []
@@ -82,7 +92,7 @@ class StartupScriptRunner:
             exec(code, globals())
             script_executed = True
 
-        p2 = pathlib.Path('%1') / script_path
+        p2 = pathlib.Path(%1) / script_path
         if p2.exists() and p2 != p1:
             self.info_messages.append(f"Executed startup script: {p2}")
             code = compile(p2.read_text(), p2, 'exec')
@@ -106,14 +116,10 @@ class StartupScriptRunner:
             QgsMessageLog.logMessage(msg, "QGIS", Qgis.MessageLevel.Warning)
 
 _ssr = StartupScriptRunner()
-        """,
-        'QgsPythonUtilsImpl::checkSystemImports [run_startup_script]',
-        'exec',
-    ),
-    globals(),
-)
 )"""" )
-      .arg( QString( pythonPath() ).replace( '\\', '/' ) ),
+                                  .arg( pythonStringLiteral( pythonPath() ) );
+  runString(
+    u"exec(compile(%1, 'QgsPythonUtilsImpl::checkSystemImports [run_startup_script]', 'exec'), globals())"_s.arg( pythonStringLiteral( startupScript ) ),
     QObject::tr( "Couldn't create run_startup_script." ),
     true
   );
@@ -141,21 +147,15 @@ _ssr = StartupScriptRunner()
       msg->setMessage( QObject::tr( "The extra plugin path '%1' does not exist!" ).arg( p ), Qgis::StringFormat::PlainText );
       msg->showMessage();
     }
-#ifdef Q_OS_WIN
-    p.replace( '\\', "\\\\" );
-#endif
-    // we store here paths in unicode strings
-    // the str constant will contain utf8 code (through runString)
-    // so we call '...'.decode('utf-8') to make a unicode string
-    pluginpaths << '"' + p + '"';
+    pluginpaths << pythonStringLiteral( p );
   }
   pluginpaths << homePluginsPath();
-  pluginpaths << '"' + pluginsPath() + '"';
+  pluginpaths << pythonStringLiteral( pluginsPath() );
 
   // expect that bindings are installed locally, so add the path to modules
   // also add path to plugins
   QStringList newpaths;
-  newpaths << '"' + pythonPath() + '"';
+  newpaths << pythonStringLiteral( pythonPath() );
   newpaths << homePythonPath();
   newpaths << pluginpaths;
   runString( "sys.path = [" + newpaths.join( ','_L1 ) + "] + sys.path" );
@@ -193,7 +193,7 @@ _ssr = StartupScriptRunner()
 
   // tell the utils script where to look for the plugins
   runString( u"qgis.utils.plugin_paths = [%1]"_s.arg( pluginpaths.join( ',' ) ) );
-  runString( u"qgis.utils.sys_plugin_path = \"%1\""_s.arg( pluginsPath() ) );
+  runString( u"qgis.utils.sys_plugin_path = %1"_s.arg( pythonStringLiteral( pluginsPath() ) ) );
   runString( u"qgis.utils.HOME_PLUGIN_PATH = %1"_s.arg( homePluginsPath() ) ); // note - homePluginsPath() returns a python expression, not a string literal
 
 #ifdef Q_OS_WIN
@@ -326,7 +326,7 @@ void QgsPythonUtilsImpl::doCustomImports()
   QStringList::const_iterator iter = startupPaths.constBegin();
   for ( ; iter != startupPaths.constEnd(); ++iter )
   {
-    runString( u"spec = importlib.util.spec_from_file_location('startup','%1')"_s.arg( *iter ) );
+    runString( u"spec = importlib.util.spec_from_file_location('startup', %1)"_s.arg( pythonStringLiteral( *iter ) ) );
     runString( u"module = importlib.util.module_from_spec(spec)"_s );
     runString( u"spec.loader.exec_module(module)"_s );
   }
@@ -346,11 +346,9 @@ void QgsPythonUtilsImpl::initPython( QgisInterface *interface, const bool instal
   if ( !faultHandlerLogPath.isEmpty() )
   {
     runString( u"import faulthandler"_s );
-    QString escapedPath = faultHandlerLogPath;
-    escapedPath.replace( '\\', "\\\\"_L1 );
-    escapedPath.replace( '\'', "\\'"_L1 );
-    runString( u"qgis.utils.__qgis_fault_handler_file_path='%1'"_s.arg( escapedPath ) );
-    runString( u"qgis.utils.__qgis_fault_handler_file=open('%1', 'wt')"_s.arg( escapedPath ) );
+    const QString pathLiteral = pythonStringLiteral( faultHandlerLogPath );
+    runString( u"qgis.utils.__qgis_fault_handler_file_path=%1"_s.arg( pathLiteral ) );
+    runString( u"qgis.utils.__qgis_fault_handler_file=open(%1, 'wt')"_s.arg( pathLiteral ) );
     runString( u"faulthandler.enable(file=qgis.utils.__qgis_fault_handler_file)"_s );
     mFaultHandlerLogPath = faultHandlerLogPath;
   }
@@ -897,11 +895,11 @@ QString QgsPythonUtilsImpl::homePythonPath() const
   QString settingsDir = QgsApplication::qgisSettingsDirPath();
   if ( QDir::cleanPath( settingsDir ) == QDir::homePath() + u"/.qgis3"_s )
   {
-    return u"\"%1/.qgis3/python\""_s.arg( QDir::homePath() );
+    return pythonStringLiteral( QDir::homePath() + u"/.qgis3/python"_s );
   }
   else
   {
-    return u"\""_s + settingsDir.replace( '\\', "\\\\"_L1 ) + u"python\""_s;
+    return pythonStringLiteral( settingsDir + u"python"_s );
   }
 }
 

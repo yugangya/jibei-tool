@@ -1383,7 +1383,15 @@ int main( int argc, char *argv[] )
   const QString applicationDir = QApplication::applicationDirPath();
   const QString localQtPlugins = QDir::cleanPath( applicationDir + QDir::separator() + "qtplugins" );
   const QString localQt6Plugins = QDir::cleanPath( applicationDir + QDir::separator() + "Qt6" + QDir::separator() + "plugins" );
-  const QString systemQtPlugins = QDir::cleanPath( QStringLiteral( QT_PLUGINS_DIR ) );
+  const QString compiledQtPlugins = QDir::cleanPath( QStringLiteral( QT_PLUGINS_DIR ) );
+  const QString portableQtPlugins = QDir::cleanPath( applicationDir + "/../../osgeo4w/apps/Qt6/plugins" );
+  const bool hasPortableQtPlugins = QDir( portableQtPlugins ).exists();
+  const QString systemQtPlugins = hasPortableQtPlugins ? portableQtPlugins : compiledQtPlugins;
+
+  // The portable runtime must use its bundled Qt plugins even on the build
+  // machine, where Qt's compiled installation directory still exists.
+  if ( hasPortableQtPlugins )
+    QCoreApplication::removeLibraryPath( compiledQtPlugins );
 
   QCoreApplication::addLibraryPath( localQtPlugins );
   if ( QDir( localQt6Plugins ).exists() )
