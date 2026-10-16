@@ -1100,7 +1100,10 @@ int main( int argc, char *argv[] )
   // - use a default location as a fallback
   if ( globalsettingsfile.isEmpty() )
   {
-    globalsettingsfile = getenv( "QGIS_GLOBAL_SETTINGS_FILE" );
+    // Read path-valued environment variables through Qt so Unicode Windows
+    // paths survive intact. getenv() uses the ANSI code page on Windows and
+    // can turn a valid deployment path into a non-existent one.
+    globalsettingsfile = qEnvironmentVariable( "QGIS_GLOBAL_SETTINGS_FILE" );
   }
 
   if ( globalsettingsfile.isEmpty() )
@@ -1138,9 +1141,10 @@ int main( int argc, char *argv[] )
   if ( configLocalStorageLocation.isEmpty() )
   {
     QSettings globalSettings( globalsettingsfile, QSettings::IniFormat );
-    if ( getenv( "QGIS_CUSTOM_CONFIG_PATH" ) )
+    const QString customConfigPath = qEnvironmentVariable( "QGIS_CUSTOM_CONFIG_PATH" );
+    if ( qEnvironmentVariableIsSet( "QGIS_CUSTOM_CONFIG_PATH" ) )
     {
-      configLocalStorageLocation = getenv( "QGIS_CUSTOM_CONFIG_PATH" );
+      configLocalStorageLocation = customConfigPath;
       // If an explicit QGIS_CUSTOM_CONFIG_PATH was specified, we don't do ANY settings migration logic.
       // We'll instead leave that up to the system administrator to do.
       preventSettingsMigration = true;
@@ -1582,7 +1586,7 @@ int main( int argc, char *argv[] )
         else
         {
 #ifdef Q_OS_WIN
-          if ( envVarApply != "undefined" || !getenv( envVarName.toUtf8().constData() ) )
+          if ( envVarApply != "undefined" || !qEnvironmentVariableIsSet( envVarName.toUtf8().constData() ) )
             _wputenv_s( envVarName.toStdWString().c_str(), envVarValue.toStdWString().c_str() );
 #else
           setenv( envVarName.toUtf8().constData(), envVarValue.toUtf8().constData(), envVarApply == "undefined"_L1 ? 0 : 1 );
@@ -1941,7 +1945,7 @@ int main( int argc, char *argv[] )
   // - use a default location as a fallback (this is set in QgsApplication initialization)
   if ( openClProgramFolder.isEmpty() )
   {
-    openClProgramFolder = getenv( "QGIS_OPENCL_PROGRAM_FOLDER" );
+    openClProgramFolder = qEnvironmentVariable( "QGIS_OPENCL_PROGRAM_FOLDER" );
   }
 
   if ( !openClProgramFolder.isEmpty() )

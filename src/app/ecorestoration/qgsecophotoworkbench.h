@@ -25,6 +25,7 @@ class QLabel;
 class QListWidget;
 class QProgressBar;
 class QPushButton;
+class QToolButton;
 class QVariantAnimation;
 class QTabWidget;
 class QCheckBox;
@@ -69,7 +70,7 @@ class QgsEcoPhotoWorkbench final : public QWidget
     void reloadIndex();
     bool saveIndex() const;
     void scheduleIndexSave();
-    void rebuildPhotoList();
+    void rebuildPhotoList( bool resetScrollPosition = false );
     void queueThumbnail( const QString &path, QWidget *entry );
     void loadNextThumbnail();
     void loadPreviewImage( bool fused );
@@ -97,6 +98,7 @@ class QgsEcoPhotoWorkbench final : public QWidget
     void deleteAnnotationAt( int annotationIndex );
     void addAnnotation( int classId, const QString &className, const QPolygonF &normalizedPolygon, const QString &source = QStringLiteral( "manual" ) );
     void updateSelectAllCheckBoxState();
+    void updatePhotoSelectionActions();
     void exportOriginalPhotos();
     void createFusedPhotos();
     void exportFusedPhotos();
@@ -145,9 +147,7 @@ class QgsEcoPhotoWorkbench final : public QWidget
     QPushButton *mDeleteAnnotationButton = nullptr;
     QPushButton *mEditAnnotationButton = nullptr;
     QPushButton *mCreateFusionButton = nullptr;
-    QPushButton *mExportOriginalButton = nullptr;
-    QPushButton *mExportFusedButton = nullptr;
-    QPushButton *mExportYoloButton = nullptr;
+    QToolButton *mExportMenuButton = nullptr;
     QCheckBox *mSelectAllCheckBox = nullptr;
     bool mDeleteMode = false;
     QSet<QString> mCheckedPhotoPaths;

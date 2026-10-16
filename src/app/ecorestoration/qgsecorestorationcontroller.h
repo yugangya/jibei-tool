@@ -9,6 +9,7 @@
 
 #include "qgsgeometry.h"
 #include "qgscoordinatereferencesystem.h"
+#include "qgspointxy.h"
 #include "qgsrectangle.h"
 
 #include <QColor>
@@ -96,8 +97,8 @@ class QgsEcoRestorationController final : public QObject
     void runTowerRecognition();
     void startExtentRecognition();
     void cancelExtentRecognition();
-    void runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString() );
-    void runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId );
+    void runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString(), const QString &rasterLayerId = QString(), const QStringList &towerFeatureIds = QStringList() );
+    void runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId, const QString &pinnedRasterLayerId, const QStringList &towerFeatureIds );
     void runRecognitionLegacy( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId = QString() );
     QgsVectorLayer *createResultLayer( bool restoration = false, bool notify = true, const QString &phaseId = QString(), const QString &recognitionMode = QString() );
     QgsVectorLayer *createSmartSegmentationLayer( const QString &layerName, const QgsCoordinateReferenceSystem &crs, bool notify = false );
@@ -112,7 +113,7 @@ class QgsEcoRestorationController final : public QObject
     void setThreeDMode( bool enabled );
     void hideNativeQgisWidgets();
     void toggleTowerDisplayMode( QgsVectorLayer *layer );
-    QVector<QgsRectangle> towerRecognitionExtents( QgsVectorLayer *towerLayer, const QgsCoordinateReferenceSystem &targetCrs, QStringList *labels = nullptr ) const;
+    QVector<QgsRectangle> towerRecognitionExtents( QgsVectorLayer *towerLayer, const QgsCoordinateReferenceSystem &targetCrs, QStringList *labels = nullptr, QStringList *towerFeatureIds = nullptr ) const;
     void updateRecognitionPreview();
     void clearRecognitionPreview();
     QgsVectorLayer *ensureDisturbanceResultLayer( const QString &phaseId = QString(), const QString &recognitionMode = QString() );
@@ -121,6 +122,8 @@ class QgsEcoRestorationController final : public QObject
     void showRecognitionResultTable( const QString &resultLayerId );
     void scheduleRecognitionResultTableRefresh();
     void refreshRecognitionResultTable();
+    void saveRecognitionResultTowerBinding( const QString &layerId, qint64 featureId, const QString &number, const QString &towerLayerId = QString(), const QString &towerFeatureId = QString() );
+    QgsVectorLayer *recognitionResultTowerLayer( QgsVectorLayer *resultLayer ) const;
     void showRecognitionResultContextMenu( const QPoint &pos );
     bool focusRecognitionResultRow( int row, double scale = 1250.0 );
     void editRecognitionResultForRow( int row );
@@ -129,9 +132,11 @@ class QgsEcoRestorationController final : public QObject
     void deleteRecognitionResultForRow( int row );
     void setRecognitionResultVisibilityForRow( int row, bool visible );
     void finishRecognitionEditing( QgsVectorLayer *layer );
+    bool resumeRecognitionEditingMapTool();
     void normalizeRecognitionResultLayerAfterEdit( QgsVectorLayer *layer );
     void showTowerStyleDialog( QgsVectorLayer *layer );
     QgsRasterLayer *selectedRecognitionRasterLayer() const;
+    QgsRasterLayer *rasterForExtentRecognition( const QgsRectangle &canvasExtent, QgsRectangle *rasterExtent ) const;
     QgsVectorLayer *selectedRecognitionTowerLayer() const;
     QString askSmartSegmentationLayerName() const;
     void startSmartSegmentation();
@@ -143,6 +148,7 @@ class QgsEcoRestorationController final : public QObject
     void commitSmartSegmentationClassified();
     void deleteSmartSegmentationPendingFeature();
     QgsVectorLayer *ensureSmartSegmentationProblemLayer( const QString &problemKey );
+    QgsRasterLayer *smartSegmentationRasterLayer() const;
     void leaveSmartSegmentationTool();
 
     void ensureBusinessGroups();
@@ -198,6 +204,8 @@ class QgsEcoRestorationController final : public QObject
     int mRecognitionScanTileIndex = 0;
     QPointer<QLabel> mRecognitionSelectionLabel;
     QPointer<QgsMapToolExtent> mRecognitionExtentTool;
+    QString mRecognitionExtentRasterLayerId;
+    QString mRecognitionExtentPhaseId;
     QPointer<QgsMapTool> mRecognitionPreviousMapTool;
     QPointer<QgsDockWidget> mRecognitionDock;
     QPointer<QgsDockWidget> mSmartSegmentationDock;
@@ -226,6 +234,7 @@ class QgsEcoRestorationController final : public QObject
     QString mRecognitionEditingTowerLabel;
     QString mRecognitionEditingLayerId;
     qint64 mRecognitionEditingFeatureId = -1;
+    QPointer<QgsMapTool> mRecognitionEditingMapTool;
     QString mManualTowerDrawingLayerId;
     QPointer<QAction> mSmartSegmentationAction;
     QPointer<QgsMapTool> mSmartSegmentationTool;
@@ -246,6 +255,13 @@ class QgsEcoRestorationController final : public QObject
     bool mSmartSegmentationCommitInProgress = false;
     bool mSmartSegmentationStandalone = true;
     QgsCoordinateReferenceSystem mSmartSegmentationOutputCrs;
+    QString mSmartSegmentationSessionRasterLayerId;
+    QString mSmartSegmentationSessionPhaseId;
+    bool mSmartSegmentationRasterPinned = false;
+    bool mSmartSegmentationPreviewRunning = false;
+    quint64 mSmartSegmentationRequestRevision = 0;
+    QVector<QgsPointXY> mSmartSegmentationLatestPoints;
+    QVector<int> mSmartSegmentationLatestLabels;
     QPointer<QToolButton> mThreeDSwitch;
     QString mThreeDViewName;
     QPointer<QComboBox> mResultLayerCombo;

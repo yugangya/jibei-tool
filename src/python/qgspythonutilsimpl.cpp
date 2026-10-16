@@ -910,11 +910,15 @@ QString QgsPythonUtilsImpl::homePluginsPath() const
 
 QStringList QgsPythonUtilsImpl::extraPluginsPaths() const
 {
-  const char *cpaths = getenv( "QGIS_PLUGINPATH" );
-  if ( !cpaths )
+  // Use Qt's environment accessors here rather than getenv(). On Windows,
+  // getenv() decodes the process environment through the current ANSI code
+  // page, which corrupts non-ASCII deployment paths (for example a profile
+  // or plugin directory under a Chinese-named folder). Qt reads the native
+  // wide-character environment and preserves the path exactly.
+  const QString paths = qEnvironmentVariable( "QGIS_PLUGINPATH" );
+  if ( paths.isEmpty() )
     return QStringList();
 
-  const QString paths = QString::fromLocal8Bit( cpaths );
 #ifndef Q_OS_WIN
   if ( paths.contains( ':' ) )
     return paths.split( ':', Qt::SkipEmptyParts );

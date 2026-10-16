@@ -7,6 +7,7 @@
 #include "qgsapplication.h"
 #include "qgsecosam2onnxinference.h"
 #include "qgsecoonnxinference.h"
+#include "qgssettings.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -19,6 +20,7 @@
 #include <QDir>
 #include <QDialog>
 #include <QEnterEvent>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -68,6 +70,8 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QToolButton>
+#include <QMenu>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSaveFile>
@@ -91,6 +95,30 @@ namespace
   constexpr int sPhotoThumbnailExtent = 88;
   constexpr int sPhotoPreviewMaxPixels = 4096;
   constexpr int sPhotoProblemClassCount = 4;
+
+  QIcon tintedThemeIcon( const QString &themePath, const QColor &tint )
+  {
+    const QIcon source = QgsApplication::getThemeIcon( themePath );
+    if ( source.isNull() )
+      return source;
+
+    const QSize iconSize( 16, 16 );
+    const QPixmap sourcePixmap = source.pixmap( iconSize, QIcon::Normal, QIcon::Off );
+    if ( sourcePixmap.isNull() )
+      return source;
+
+    QImage tinted( sourcePixmap.size(), QImage::Format_ARGB32_Premultiplied );
+    tinted.fill( tint );
+    tinted.setDevicePixelRatio( sourcePixmap.devicePixelRatio() );
+    QPainter painter( &tinted );
+    painter.setCompositionMode( QPainter::CompositionMode_DestinationIn );
+    painter.drawPixmap( 0, 0, sourcePixmap );
+    painter.end();
+
+    QIcon result;
+    result.addPixmap( QPixmap::fromImage( tinted ), QIcon::Normal, QIcon::Off );
+    return result;
+  }
 
   QString photoIndexFilePath( const QString &workspacePath )
   {
@@ -719,8 +747,146 @@ void syncListEntrySelectionState( QListWidget *list )
       continue;
     auto *entry = dynamic_cast<PhotoListEntryWidget *>( list->itemWidget( item ) );
     if ( entry )
-      entry->setSelectedState( item == currentItem || item->isSelected() );
+      // Checkbox state is independent from the preview/card selection.  Keep
+      // exactly one visual card selected: the item currently shown in the
+      // preview.  QListWidget's item selection must not leave stale cards
+      // highlighted after a rebuild or a select-all operation.
+      entry->setSelectedState( item == currentItem );
   }
+}
+
+namespace
+{
+  constexpr int sPhotoIdentityRole = Qt::UserRole + 1;
+
+  class PhotoListViewportRestorer final : public QObject
+  {
+    public:
+      PhotoListViewportRestorer( QListWidget *list, std::function<void()> restore )
+        : QObject( list ), mList( list ), mRestore( std::move( restore ) )
+      {
+        setObjectName( QStringLiteral( "EcoPhotoListViewportRestorer" ) );
+        list->installEventFilter( this );
+      }
+
+    protected:
+      bool eventFilter( QObject *watched, QEvent *event ) override
+      {
+        if ( watched == mList && event->type() == QEvent::Show )
+        {
+          mList->removeEventFilter( this );
+          QTimer::singleShot( 0, this, [this] {
+            mRestore();
+            deleteLater();
+          } );
+        }
+        return false;
+      }
+
+    private:
+      QListWidget *mList = nullptr;
+      std::function<void()> mRestore;
+  };
+
+  struct PhotoListViewState
+  {
+    explicit PhotoListViewState( QListWidget *list )
+      : currentRow( list->currentRow() )
+      , verticalPosition( list->count() > 0 ? list->verticalScrollBar()->value() : 0 )
+      , horizontalPosition( list->count() > 0 ? list->horizontalScrollBar()->value() : 0 )
+    {
+      if ( const QListWidgetItem *current = list->currentItem() )
+        currentKey = current->data( sPhotoIdentityRole ).toString();
+      const QModelIndex topIndex = list->indexAt( QPoint( 0, 0 ) );
+      if ( topIndex.isValid() )
+      {
+        const QListWidgetItem *top = list->item( topIndex.row() );
+        topKey = top->data( sPhotoIdentityRole ).toString();
+        topOffset = list->visualItemRect( top ).top();
+      }
+    }
+
+    void restore( QListWidget *list ) const
+    {
+      if ( list->count() == 0 )
+        return;
+
+      int restoredRow = std::clamp( currentRow, 0, list->count() - 1 );
+      for ( int row = 0; row < list->count(); ++row )
+      {
+        QListWidgetItem *item = list->item( row );
+        const QString key = item->data( sPhotoIdentityRole ).toString();
+        if ( !currentKey.isEmpty() && key == currentKey )
+          restoredRow = row;
+      }
+      list->setCurrentRow( restoredRow );
+
+      // Rebuilding schedules a layout and selecting the current row scrolls to
+      // it. Finish both before restoring the user's viewport, including when
+      // rows above it were removed or new fused photos were inserted.
+      list->doItemsLayout();
+      restoreViewport( list );
+
+      // A hidden tab also scrolls to its current item when it receives focus.
+      // Restore once more after tab activation, unless another rebuild or a
+      // new user selection has already replaced this view state.
+      const qulonglong revision = list->property( "eco/photoListViewRevision" ).toULongLong() + 1;
+      list->setProperty( "eco/photoListViewRevision", revision );
+      const QString restoredKey = list->currentItem()->data( sPhotoIdentityRole ).toString();
+      const auto restore = [list, state = *this, revision, restoredKey] {
+        if ( list->property( "eco/photoListViewRevision" ).toULongLong() != revision
+             || !list->currentItem() || list->currentItem()->data( sPhotoIdentityRole ).toString() != restoredKey )
+          return;
+        list->doItemsLayout();
+        state.restoreViewport( list );
+      };
+      for ( QObject *child : list->children() )
+      {
+        if ( child->objectName() == QStringLiteral( "EcoPhotoListViewportRestorer" ) )
+        {
+          list->removeEventFilter( child );
+          child->deleteLater();
+        }
+      }
+      if ( list->isVisible() )
+        QTimer::singleShot( 0, list, restore );
+      else
+        new PhotoListViewportRestorer( list, restore );
+    }
+
+    void restoreViewport( QListWidget *list ) const
+    {
+      QListWidgetItem *top = nullptr;
+      if ( !topKey.isEmpty() )
+      {
+        for ( int row = 0; row < list->count(); ++row )
+        {
+          QListWidgetItem *item = list->item( row );
+          if ( item->data( sPhotoIdentityRole ).toString() == topKey )
+          {
+            top = item;
+            break;
+          }
+        }
+      }
+      if ( top )
+      {
+        list->scrollToItem( top, QAbstractItemView::PositionAtTop );
+        if ( list->verticalScrollMode() == QAbstractItemView::ScrollPerPixel )
+          list->verticalScrollBar()->setValue( list->verticalScrollBar()->value() - topOffset );
+      }
+      else
+        list->verticalScrollBar()->setValue( verticalPosition );
+      list->horizontalScrollBar()->setValue( horizontalPosition );
+    }
+
+    int currentRow = -1;
+    int verticalPosition = 0;
+    int horizontalPosition = 0;
+    QString currentKey;
+    QString topKey;
+    int topOffset = 0;
+  };
 }
 
 class PhotoPolygonItem final : public QGraphicsPolygonItem
@@ -1168,6 +1334,13 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     QWidget#EcoPhotoWorkbench QPushButton[primary="true"] { color:#f8fbff; background:#066c9e; border-color:#169bce; font-weight:600; }
     QWidget#EcoPhotoWorkbench QPushButton[primary="true"]:hover { background:#0b7fb5; }
     QWidget#EcoPhotoWorkbench QPushButton:checked { background:#0e639c; border-color:#38bdf8; color:white; }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="remove"] { color:#fff5f5; background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #a52636, stop:1 #c93649); border:1px solid #ed6170; font-weight:700; }
+    QWidget#EcoPhotoWorkbench QPushButton[photoAction="remove"]:enabled:hover { background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #bd3043, stop:1 #dc4257); border-color:#ff8b98; }
+    QWidget#EcoPhotoWorkbench QPushButton[photoSelectionAction="true"]:disabled { color:#687789; background:#1b2430; border-color:#303b49; }
+    QToolTip { color:#f1f5f9; background:transparent; border:none; padding:3px 5px; }
+    QWidget#EcoPhotoWorkbench QToolButton#EcoPhotoExportMenuButton { color:#dce8f5; background:#26313d; border:1px solid #405061; border-radius:4px; }
+    QWidget#EcoPhotoWorkbench QToolButton#EcoPhotoExportMenuButton:hover { background:#304253; border-color:#5b7288; }
+    QWidget#EcoPhotoWorkbench QToolButton#EcoPhotoExportMenuButton:disabled { background:#1b2430; border-color:#303b49; }
     QWidget#EcoPhotoWorkbench QPushButton[photoAi="segment"] {
       min-height:27px;
 
@@ -1236,7 +1409,8 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     QWidget#EcoPhotoWorkbench QPushButton[photoAction="recognize"]:hover {
       background:qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7c3aed, stop:0.55 #8b5cf6, stop:1 #38bdf8);
       border-color:#c084fc;
-    }    QWidget#EcoPhotoWorkbench QProgressBar { min-height:9px; max-height:9px; padding:0; color:#e5eef7; background:#0b1220; border:1px solid #273244; border-radius:999px; text-align:center; font-size:9px; }
+    }
+    QWidget#EcoPhotoWorkbench QProgressBar { min-height:9px; max-height:9px; padding:0; color:#e5eef7; background:#0b1220; border:1px solid #273244; border-radius:999px; text-align:center; font-size:9px; }
     QWidget#EcoPhotoWorkbench QProgressBar::chunk { margin:0; background:qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #22d3ee, stop:0.55 #3b82f6, stop:1 #8b5cf6); border-radius:999px; }
   )" ) );
 
@@ -1266,25 +1440,56 @@ class EcoPhotoAnnotationView final : public QGraphicsView
       mImportButton = new QPushButton( QgsApplication::getThemeIcon( QStringLiteral( "/mActionAdd.svg" ) ), tr( "导入照片" ), this );
     mImportButton->setProperty( "primary", true );
   mImportButton->setProperty( "photoAction", "import" );
-      mRemoveButton = new QPushButton( tr( "移除所选" ), this );
+      mRemoveButton = new QPushButton( tintedThemeIcon( QStringLiteral( "/mActionDeleteSelected.svg" ), QColor( QStringLiteral( "#ffffff" ) ) ), tr( "移除所选" ), this );
       mCreateFusionButton = new QPushButton( tr( "生成融合照片" ), this );
-      mExportOriginalButton = new QPushButton( tr( "导出原图" ), this );
-      mExportFusedButton = new QPushButton( tr( "导出融合图" ), this );
-      mExportYoloButton = new QPushButton( tr( "导出 YOLO 样本" ), this );
+      mCreateFusionButton->setProperty( "photoAction", "fusion" );
+      // Keep this action visibly green even when the selection requirement
+      // disables it.  The button sits inside a separately styled list header,
+      // so an explicit widget stylesheet prevents the header or QGIS global
+      // stylesheet from flattening it to a plain text action.
+      mCreateFusionButton->setStyleSheet( QStringLiteral(
+        "QPushButton { min-height:27px; padding:4px 12px; color:#effff6; "
+        "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #15803d,stop:0.55 #16a34a,stop:1 #22c55e); "
+        "border:1px solid #4ade80; border-radius:4px; font-weight:700; }"
+        "QPushButton:hover:enabled { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #16a34a,stop:0.55 #22c55e,stop:1 #34d399); border-color:#86efac; }"
+        "QPushButton:disabled { color:#d1fae5; background:#166534; border:1px solid #4ade80; }" ) );
+      mRemoveButton->setProperty( "photoAction", "remove" );
+      mRemoveButton->setIconSize( QSize( 16, 16 ) );
+      mCreateFusionButton->setProperty( "photoSelectionAction", true );
+      mRemoveButton->setProperty( "photoSelectionAction", true );
+      mCreateFusionButton->setToolTip( tr( "请先勾选照片" ) );
+      mRemoveButton->setToolTip( tr( "请先勾选照片" ) );
+      mExportMenuButton = new QToolButton( this );
+      mExportMenuButton->setObjectName( QStringLiteral( "EcoPhotoExportMenuButton" ) );
+      mExportMenuButton->setIcon( QgsApplication::getThemeIcon( QStringLiteral( "/mActionSharingExport.svg" ) ) );
+      mExportMenuButton->setIconSize( QSize( 18, 18 ) );
+      mExportMenuButton->setToolButtonStyle( Qt::ToolButtonIconOnly );
+      mExportMenuButton->setFixedSize( 36, 36 );
+      mExportMenuButton->setToolTip( tr( "导出" ) );
+      mExportMenuButton->setPopupMode( QToolButton::InstantPopup );
+      QMenu *exportMenu = new QMenu( mExportMenuButton );
+      exportMenu->setStyleSheet( QStringLiteral(
+        "QMenu { color:#dce8f5; background:#202a36; border:1px solid #405061; padding:4px; }"
+        "QMenu::item { padding:7px 18px; border-radius:3px; }"
+        "QMenu::item:selected { color:#ffffff; background:#0e639c; }" ) );
+      QAction *exportFusedAction = exportMenu->addAction( tr( "导出融合图" ) );
+      QAction *exportYoloAction = exportMenu->addAction( tr( "导出 YOLO 样本" ) );
+      mExportMenuButton->setMenu( exportMenu );
+      connect( exportFusedAction, &QAction::triggered, this, [this] { exportFusedPhotos(); } );
+      connect( exportYoloAction, &QAction::triggered, this, [this] { exportYoloSamples(); } );
   actions->addWidget( mImportButton );
   actions->addWidget( mRemoveButton );
-  actions->addSpacing( 4 );
-  actions->addWidget( mCreateFusionButton );
   actions->addStretch( 1 );
-  actions->addWidget( mExportOriginalButton );
-  actions->addWidget( mExportFusedButton );
-  actions->addWidget( mExportYoloButton );
+  actions->addWidget( mExportMenuButton );
   layout->addLayout( actions );
   QSplitter *splitter = new QSplitter( Qt::Horizontal );
   splitter->setChildrenCollapsible( false );
   mPhotoList = new QListWidget( splitter );
   mPhotoList->setIconSize( QSize( sPhotoThumbnailExtent, 64 ) );
-  mPhotoList->setSelectionMode( QAbstractItemView::ExtendedSelection );
+  // Photo batches are selected through each card checkbox.  Keep the list's
+  // current item as a single preview selection so multiple cards cannot be
+  // highlighted at the same time.
+  mPhotoList->setSelectionMode( QAbstractItemView::SingleSelection );
   mPhotoList->setMinimumWidth( 300 );
   mPhotoList->setHorizontalScrollBarPolicy( Qt::ScrollBarAlwaysOff );
 
@@ -1352,6 +1557,8 @@ class EcoPhotoAnnotationView final : public QGraphicsView
     button->setMaximumWidth( QWIDGETSIZE_MAX );
   };
   widenPhotoActionButton( mImportButton );
+  widenPhotoActionButton( mRemoveButton );
+  widenPhotoActionButton( mCreateFusionButton );
   widenPhotoActionButton( mPhotoSmartSegmentationButton );
   widenPhotoActionButton( mPhotoRecognitionButton );
   annotationLayout->addWidget( mPhotoSmartSegmentationButton );
@@ -1371,7 +1578,8 @@ class EcoPhotoAnnotationView final : public QGraphicsView
 
   // 添加照片列表顶部控制栏
   QFrame *photoListHeader = new QFrame( originalTab );
-  photoListHeader->setStyleSheet( QStringLiteral( "background:#1a1f2b; border:none; border-bottom:1px solid #2d3d4f;" ) );
+  photoListHeader->setObjectName( QStringLiteral( "EcoPhotoListHeader" ) );
+  photoListHeader->setStyleSheet( QStringLiteral( "QFrame#EcoPhotoListHeader { background:#1a1f2b; border:none; border-bottom:1px solid #2d3d4f; }" ) );
   QHBoxLayout *headerLayout = new QHBoxLayout( photoListHeader );
   headerLayout->setContentsMargins( 12, 6, 12, 6 );
   headerLayout->setSpacing( 8 );
@@ -1443,6 +1651,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   headerLayout->addWidget( selectLabel );
   headerLayout->addWidget( invertSelectionButton );
   headerLayout->addStretch( 1 );
+  headerLayout->addWidget( mCreateFusionButton );
 
   originalLayout->addWidget( photoListHeader );
   originalLayout->addWidget( splitter, 1 );
@@ -1545,10 +1754,10 @@ class EcoPhotoAnnotationView final : public QGraphicsView
   connect( mRemoveButton, &QPushButton::clicked, this, [this] { removeSelectedPhotos(); } );
   connect( mCreateFusionButton, &QPushButton::clicked, this, [this] { createFusedPhotos(); } );
   connect( mPhotoRecognitionButton, &QPushButton::clicked, this, [this] { batchRecognizePhotos(); } );
-  connect( mExportOriginalButton, &QPushButton::clicked, this, [this] { exportOriginalPhotos(); } );
-  connect( mExportFusedButton, &QPushButton::clicked, this, [this] { exportFusedPhotos(); } );
-  connect( mExportYoloButton, &QPushButton::clicked, this, [this] { exportYoloSamples(); } );
-  connect( mFusedList, &QListWidget::currentRowChanged, this, [this]( int ) { showSelectedFusedPhoto(); } );
+  connect( mFusedList, &QListWidget::currentRowChanged, this, [this]( int ) {
+    showSelectedFusedPhoto();
+    syncListEntrySelectionState( mFusedList );
+  } );
   connect( mPhotoList, &QListWidget::itemSelectionChanged, this, [this] { syncListEntrySelectionState( mPhotoList ); } );
   connect( mFusedList, &QListWidget::itemSelectionChanged, this, [this] { syncListEntrySelectionState( mFusedList ); } );
   connect( mPhotoList, &QListWidget::currentItemChanged, this, [this]( QListWidgetItem *current, QListWidgetItem *previous ) {
@@ -1559,6 +1768,7 @@ class EcoPhotoAnnotationView final : public QGraphicsView
         const QSignalBlocker blocker( mPhotoList );
         mPhotoList->setCurrentItem( previous );
       }
+      syncListEntrySelectionState( mPhotoList );
 
         QMessageBox prompt( QMessageBox::Warning, tr( "提示" ), tr( "当前标绘尚未完成，是否保存后切换照片？" ), QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, this );
 
@@ -1841,19 +2051,26 @@ void QgsEcoPhotoWorkbench::scheduleIndexSave()
   } );
 }
 
-void QgsEcoPhotoWorkbench::rebuildPhotoList()
+void QgsEcoPhotoWorkbench::rebuildPhotoList( bool resetScrollPosition )
 {
   if ( !mPhotoList )
     return;
 
   mThumbnailRequests.clear();
-  const int previousIndex = mPhotoList->currentRow();
+  PhotoListViewState viewState( mPhotoList );
+  if ( resetScrollPosition )
+  {
+    viewState.topKey.clear();
+    viewState.verticalPosition = 0;
+    viewState.horizontalPosition = 0;
+  }
   const QSignalBlocker blocker( mPhotoList );
   mPhotoList->clear();
   for ( int index = 0; index < mPhotos.size(); ++index )
   {
     QListWidgetItem *item = new QListWidgetItem();
     item->setData( Qt::UserRole, index );
+    item->setData( sPhotoIdentityRole, photoSelectionKey( mPhotos.at( index ) ) );
     item->setSizeHint( QSize( 0, 148 ) );
     mPhotoList->addItem( item );
     auto *entry = new PhotoListEntryWidget( mPhotoList, true );
@@ -1875,8 +2092,7 @@ void QgsEcoPhotoWorkbench::rebuildPhotoList()
     mPhotoList->setItemWidget( item, entry );
     updatePhotoListItem( index, true );
   }
-  if ( !mPhotos.isEmpty() )
-    mPhotoList->setCurrentRow( std::clamp( previousIndex, 0, static_cast<int>( mPhotos.size() ) - 1 ) );
+  viewState.restore( mPhotoList );
   syncListEntrySelectionState( mPhotoList );
   updateSelectAllCheckBoxState();
 
@@ -2089,7 +2305,7 @@ void QgsEcoPhotoWorkbench::updatePhotoListItem( int index, bool loadThumbnail )
   entry->setAccentColor( photoCardAccentColor( record ) );
   entry->setInfo( photoItemInfoHtml( record ) );
   entry->setChecked( mCheckedPhotoPaths.contains( photoSelectionKey( record ) ) );
-  entry->setSelectedState( item->isSelected() || item == mPhotoList->currentItem() );
+  entry->setSelectedState( item == mPhotoList->currentItem() );
   item->setToolTip( record.sourcePath );
 }
 void QgsEcoPhotoWorkbench::rebuildFusedList()
@@ -2098,18 +2314,15 @@ void QgsEcoPhotoWorkbench::rebuildFusedList()
     return;
 
   const QSignalBlocker blocker( mFusedList );
-  const int previousIndex = mFusedList->currentRow();
+  const PhotoListViewState viewState( mFusedList );
   mFusedList->clear();
-  int firstRow = -1;
-  int row = 0;
   for ( int index = 0; index < mPhotos.size(); ++index )
   {
     if ( mPhotos.at( index ).fusedPath.isEmpty() || !QFileInfo::exists( mPhotos.at( index ).fusedPath ) )
       continue;
-    if ( firstRow < 0 )
-      firstRow = row;
     QListWidgetItem *item = new QListWidgetItem();
     item->setData( Qt::UserRole, index );
+    item->setData( sPhotoIdentityRole, photoSelectionKey( mPhotos.at( index ) ) );
     item->setSizeHint( QSize( 0, 148 ) );
     mFusedList->addItem( item );
     auto *entry = new PhotoListEntryWidget( mFusedList, false );
@@ -2129,11 +2342,9 @@ void QgsEcoPhotoWorkbench::rebuildFusedList()
     } );
     mFusedList->setItemWidget( item, entry );
     updateFusedListItem( index, true );
-    ++row;
   }
-  if ( mFusedList->count() > 0 )
-    mFusedList->setCurrentRow( previousIndex >= 0 && previousIndex < mFusedList->count() ? previousIndex : firstRow );
-  else if ( mFusedPreview )
+  viewState.restore( mFusedList );
+  if ( mFusedList->count() == 0 && mFusedPreview )
     mFusedPreview->setImage( QImage(), {} );
   syncListEntrySelectionState( mFusedList );
   showSelectedFusedPhoto();
@@ -2167,7 +2378,7 @@ void QgsEcoPhotoWorkbench::updateFusedListItem( int index, bool loadThumbnail )
   entry->setStateHtml( QString() );
   entry->setAccentColor( photoCardAccentColor( record ) );
   entry->setInfo( photoItemInfoHtml( record ) );
-  entry->setSelectedState( item->isSelected() || item == mFusedList->currentItem() );
+  entry->setSelectedState( item == mFusedList->currentItem() );
 }
 void QgsEcoPhotoWorkbench::updateSummary()
 {
@@ -2218,14 +2429,43 @@ void QgsEcoPhotoWorkbench::updateSelectAllCheckBoxState()
     mSelectAllCheckBox->setCheckState( Qt::Checked );
   else
     mSelectAllCheckBox->setCheckState( Qt::PartiallyChecked );
+  updatePhotoSelectionActions();
+}
+
+void QgsEcoPhotoWorkbench::updatePhotoSelectionActions()
+{
+  bool hasChecked = false;
+  if ( mPhotoList )
+  {
+    for ( int row = 0; row < mPhotoList->count(); ++row )
+    {
+      QListWidgetItem *item = mPhotoList->item( row );
+      auto *entry = item ? dynamic_cast<PhotoListEntryWidget *>( mPhotoList->itemWidget( item ) ) : nullptr;
+      if ( entry && entry->isChecked() )
+      {
+        hasChecked = true;
+        break;
+      }
+    }
+  }
+  const bool enabled = !mBusy && !mPhaseId.isEmpty() && hasChecked;
+  if ( mCreateFusionButton )
+  {
+    mCreateFusionButton->setEnabled( enabled );
+    mCreateFusionButton->setToolTip( enabled ? tr( "生成勾选照片的融合图" ) : tr( "请先勾选照片" ) );
+  }
+  if ( mRemoveButton )
+  {
+    mRemoveButton->setEnabled( enabled );
+    mRemoveButton->setToolTip( enabled ? tr( "移除勾选照片" ) : tr( "请先勾选照片" ) );
+  }
 }
 
 void QgsEcoPhotoWorkbench::setBusy( bool busy, const QString &status )
 {
   mBusy = busy;
   const bool controlsEnabled = !busy && !mPhaseId.isEmpty();
-  const QList<QPushButton *> buttons = { mImportButton, mRemoveButton, mManualDrawButton, mPhotoSmartSegmentationButton, mPhotoRecognitionButton, mDeleteAnnotationButton, mEditAnnotationButton,
-                                         mCreateFusionButton, mExportOriginalButton, mExportFusedButton, mExportYoloButton };
+  const QList<QPushButton *> buttons = { mImportButton, mManualDrawButton, mPhotoSmartSegmentationButton, mPhotoRecognitionButton, mDeleteAnnotationButton, mEditAnnotationButton };
   for ( QPushButton *button : buttons )
   {
     if ( button )
@@ -2239,6 +2479,9 @@ void QgsEcoPhotoWorkbench::setBusy( bool busy, const QString &status )
     mFusedList->setEnabled( !busy );
   if ( mSelectAllCheckBox )
     mSelectAllCheckBox->setEnabled( controlsEnabled );
+  if ( mExportMenuButton )
+    mExportMenuButton->setEnabled( controlsEnabled );
+  updatePhotoSelectionActions();
   if ( mStatusLabel && !status.isEmpty() )
     mStatusLabel->setText( status );
   if ( mProgressBar )
@@ -2337,8 +2580,13 @@ void QgsEcoPhotoWorkbench::importPhotos()
     return;
   }
 
-  const QString defaultDirectory = QDir( mWorkspacePath ).filePath( QStringLiteral( "photos" ) );
-  QDir().mkpath( defaultDirectory );
+  const QString workspacePhotoDirectory = QDir( mWorkspacePath ).filePath( QStringLiteral( "photos" ) );
+  QDir().mkpath( workspacePhotoDirectory );
+  QgsSettings settings;
+  const QString importDirectoryKey = QStringLiteral( "EcoRestoration/photoImportDirectory" );
+  QString defaultDirectory = settings.value( importDirectoryKey, workspacePhotoDirectory, QgsSettings::App ).toString().trimmed();
+  if ( defaultDirectory.isEmpty() || !QDir( defaultDirectory ).exists() )
+    defaultDirectory = workspacePhotoDirectory;
   QFileDialog dialog( dialogParentFor( this ), tr( "导入照片" ), defaultDirectory, tr( "Photos (*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;All files (*.*)" ) );
   dialog.setWindowModality( Qt::WindowModal );
   dialog.setFileMode( QFileDialog::ExistingFiles );
@@ -2352,6 +2600,9 @@ void QgsEcoPhotoWorkbench::importPhotos()
   const QStringList paths = dialog.selectedFiles();
   if ( paths.isEmpty() )
     return;
+  const QString selectedDirectory = dialog.directory().absolutePath();
+  if ( !selectedDirectory.isEmpty() && QDir( selectedDirectory ).exists() )
+    settings.setValue( importDirectoryKey, selectedDirectory, QgsSettings::App );
 
   QSet<QString> existingPaths;
   for ( const PhotoRecord &record : std::as_const( mPhotos ) )
@@ -2360,7 +2611,7 @@ void QgsEcoPhotoWorkbench::importPhotos()
     existingPaths.insert( info.canonicalFilePath().isEmpty() ? QDir::cleanPath( record.sourcePath ) : info.canonicalFilePath() );
   }
 
-  int added = 0;
+  QVector<PhotoRecord> importedPhotos;
   int ignored = 0;
   for ( const QString &path : paths )
   {
@@ -2381,14 +2632,22 @@ void QgsEcoPhotoWorkbench::importPhotos()
     }
     PhotoRecord record;
     record.sourcePath = normalizedPath;
-    mPhotos.append( record );
+    importedPhotos.append( record );
     existingPaths.insert( normalizedPath );
-    ++added;
+  }
+
+  // Place each newly imported batch above existing records while preserving
+  // the selection order returned by QFileDialog within the batch.
+  const int added = importedPhotos.size();
+  if ( added > 0 )
+  {
+    importedPhotos += mPhotos;
+    mPhotos.swap( importedPhotos );
   }
 
   if ( added > 0 )
   {
-    rebuildPhotoList();
+    rebuildPhotoList( true );
     scheduleIndexSave();
   }
   updateSummary();
@@ -2413,17 +2672,8 @@ void QgsEcoPhotoWorkbench::removeSelectedPhotos()
   }
   if ( indexes.isEmpty() )
   {
-    const QList<QListWidgetItem *> selectedItems = mPhotoList->selectedItems();
-    for ( QListWidgetItem *item : selectedItems )
-    {
-      if ( item )
-        indexes.append( item->data( Qt::UserRole ).toInt() );
-    }
-  }
-  if ( indexes.isEmpty() )
-  {
     if ( mStatusLabel )
-       mStatusLabel->setText( tr( "请先选择要移除的照片。" ) );
+       mStatusLabel->setText( tr( "请先勾选要移除的照片。" ) );
     return;
   }
 
@@ -2969,30 +3219,6 @@ void QgsEcoPhotoWorkbench::createFusedPhotos()
           indexSet.insert( index );
           targetIndexes.append( index );
         }
-      }
-    }
-    if ( targetIndexes.isEmpty() )
-    {
-      const QList<QListWidgetItem *> selectedItems = mPhotoList->selectedItems();
-      for ( QListWidgetItem *item : selectedItems )
-      {
-        if ( !item )
-          continue;
-        const int index = item->data( Qt::UserRole ).toInt();
-        if ( !indexSet.contains( index ) )
-        {
-          indexSet.insert( index );
-          targetIndexes.append( index );
-        }
-      }
-    }
-    if ( targetIndexes.isEmpty() && mPhotoList->currentRow() >= 0 )
-    {
-      const int index = mPhotoList->currentRow();
-      if ( !indexSet.contains( index ) )
-      {
-        indexSet.insert( index );
-        targetIndexes.append( index );
       }
     }
   }

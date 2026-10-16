@@ -46,6 +46,10 @@ class QgsEcoOnnxInference
       double confidence = 0.35;
       double iouThreshold = 0.35;
       int maximumTiles = 300;
+      // Keep detections from different explicit recognition targets separate.
+      // This is enabled for tower ranges only; photo/tile inference retains
+      // the regular cross-tile NMS behavior.
+      bool preserveTargetIdentity = false;
       QVector<QgsRectangle> targetExtents;
       QStringList targetLabels;
     };

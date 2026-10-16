@@ -18,6 +18,7 @@
 #include <list>
 #include <memory>
 #include <sstream>
+#include <vector>
 #include <windows.h>
 
 void showError( std::string message, std::string title )
@@ -44,61 +45,84 @@ std::string moduleExeBaseName( void )
   return basename;
 }
 
-void setupPortableEnvironment( const std::string &exePath )
+void setupPortableEnvironment( const std::string & /*exePath */ )
 {
-  const std::string::size_type slash = exePath.find_last_of( "\\/" );
-  if ( slash == std::string::npos )
+  // The deployment package may live below a Chinese or otherwise non-ACP
+  // path.  The old ANSI GetModuleFileName/_putenv path silently replaced
+  // those characters with '?', producing invalid PYTHONHOME/PYTHONPATH and
+  // disabling Python only on the target machine.  Keep all portable path
+  // calculations in UTF-16 until they reach the Windows environment.
+  DWORD capacity = MAX_PATH;
+  std::wstring exePath;
+  for ( ;; )
+  {
+    std::vector<wchar_t> buffer( capacity );
+    const DWORD length = GetModuleFileNameW( nullptr, buffer.data(), capacity );
+    if ( length == 0 )
+      return;
+    if ( length < capacity - 1 )
+    {
+      exePath.assign( buffer.data(), length );
+      break;
+    }
+    capacity *= 2;
+    if ( capacity > 32768 )
+      return;
+  }
+
+  const std::wstring::size_type slash = exePath.find_last_of( L"\\/" );
+  if ( slash == std::wstring::npos )
     return;
 
-  const std::string binDir = exePath.substr( 0, slash );
-  const std::string::size_type prefixSlash = binDir.find_last_of( "\\/" );
-  if ( prefixSlash == std::string::npos )
+  const std::wstring binDir = exePath.substr( 0, slash );
+  const std::wstring::size_type prefixSlash = binDir.find_last_of( L"\\/" );
+  if ( prefixSlash == std::wstring::npos )
     return;
-  const std::string prefixDir = binDir.substr( 0, prefixSlash );
-  const std::string::size_type packageSlash = prefixDir.find_last_of( "\\/" );
-  if ( packageSlash == std::string::npos )
+  const std::wstring prefixDir = binDir.substr( 0, prefixSlash );
+  const std::wstring::size_type packageSlash = prefixDir.find_last_of( L"\\/" );
+  if ( packageSlash == std::wstring::npos )
     return;
-  const std::string packageDir = prefixDir.substr( 0, packageSlash );
-  const std::string osgeoRoot = packageDir + "\\osgeo4w";
-  const std::string pythonDir = osgeoRoot + "\\apps\\Python312";
-  const std::string qtDir = osgeoRoot + "\\apps\\Qt6";
+  const std::wstring packageDir = prefixDir.substr( 0, packageSlash );
+  const std::wstring osgeoRoot = packageDir + L"\\osgeo4w";
+  const std::wstring pythonDir = osgeoRoot + L"\\apps\\Python312";
+  const std::wstring qtDir = osgeoRoot + L"\\apps\\Qt6";
 
   // Only activate this fallback for the portable Jianghe package layout.
-  if ( _access( ( prefixDir + "\\python" ).c_str(), 0 ) != 0 ||
-       _access( qtDir.c_str(), 0 ) != 0 ||
-       _access( pythonDir.c_str(), 0 ) != 0 )
+  if ( _waccess( ( prefixDir + L"\\python" ).c_str(), 0 ) != 0 ||
+       _waccess( qtDir.c_str(), 0 ) != 0 ||
+       _waccess( pythonDir.c_str(), 0 ) != 0 )
     return;
 
-  const std::string gdalRoot = osgeoRoot + "\\apps\\gdal-dev";
-  const std::string pdalRoot = osgeoRoot + "\\apps\\pdal-dev";
-  const std::string msysRoot = osgeoRoot + "\\apps\\msys";
-  const std::string pluginPath = binDir + "\\qtplugins";
-  const std::string qtPluginPath = qtDir + "\\plugins";
-  const std::string onnxRoot = packageDir + "\\onnxruntime";
-  const char *systemRootEnv = getenv( "SystemRoot" );
-  const std::string systemRoot = systemRootEnv ? systemRootEnv : "C:\\Windows";
-  const std::string path = binDir + ";" + prefixDir + ";" +
-                           osgeoRoot + "\\bin;" + qtDir + "\\bin;" +
-                           gdalRoot + "\\bin;" + pdalRoot + "\\bin;" +
-                           msysRoot + "\\bin;" + pythonDir + ";" +
-                           pythonDir + "\\Scripts;" + pythonDir + "\\DLLs;" +
-                           onnxRoot + "\\lib;" + systemRoot + "\\System32;" +
-                           systemRoot;
+  const std::wstring gdalRoot = osgeoRoot + L"\\apps\\gdal-dev";
+  const std::wstring pdalRoot = osgeoRoot + L"\\apps\\pdal-dev";
+  const std::wstring msysRoot = osgeoRoot + L"\\apps\\msys";
+  const std::wstring pluginPath = binDir + L"\\qtplugins";
+  const std::wstring qtPluginPath = qtDir + L"\\plugins";
+  const std::wstring onnxRoot = packageDir + L"\\onnxruntime";
+  const wchar_t *systemRootEnv = _wgetenv( L"SystemRoot" );
+  const std::wstring systemRoot = systemRootEnv ? systemRootEnv : L"C:\\Windows";
+  const std::wstring path = binDir + L";" + prefixDir + L";" +
+                            osgeoRoot + L"\\bin;" + qtDir + L"\\bin;" +
+                            gdalRoot + L"\\bin;" + pdalRoot + L"\\bin;" +
+                            msysRoot + L"\\bin;" + pythonDir + L";" +
+                            pythonDir + L"\\Scripts;" + pythonDir + L"\\DLLs;" +
+                            onnxRoot + L"\\lib;" + systemRoot + L"\\System32;" +
+                            systemRoot;
 
-  _putenv( ( "QGIS_PREFIX_PATH=" + prefixDir ).c_str() );
-  _putenv( ( "QGIS_PLUGINPATH=" + prefixDir + "\\plugins" ).c_str() );
-  _putenv( ( "QT_PLUGIN_PATH=" + qtPluginPath + ";" + pluginPath ).c_str() );
-  _putenv( ( "QCA_PLUGIN_PATH=" + qtPluginPath + ";" + pluginPath ).c_str() );
-  _putenv( ( "QT_QPA_PLATFORM_PLUGIN_PATH=" + qtPluginPath + "\\platforms" ).c_str() );
-  _putenv( ( "PYTHONHOME=" + pythonDir ).c_str() );
-  _putenv( ( "PYTHONPATH=" + prefixDir + "\\python;" + pythonDir + "\\Lib;" +
-             pythonDir + "\\DLLs;" + pythonDir + "\\Lib\\site-packages;" +
-             packageDir + "\\python-support" ).c_str() );
-  _putenv( "PYTHONNOUSERSITE=1" );
-  _putenv( ( "GDAL_DATA=" + osgeoRoot + "\\share\\gdal" ).c_str() );
-  _putenv( ( "PROJ_DATA=" + osgeoRoot + "\\share\\proj" ).c_str() );
-  _putenv( ( "PROJ_LIB=" + osgeoRoot + "\\share\\proj" ).c_str() );
-  _putenv( ( "PATH=" + path ).c_str() );
+  _wputenv( ( L"QGIS_PREFIX_PATH=" + prefixDir ).c_str() );
+  _wputenv( ( L"QGIS_PLUGINPATH=" + prefixDir + L"\\plugins" ).c_str() );
+  _wputenv( ( L"QT_PLUGIN_PATH=" + qtPluginPath + L";" + pluginPath ).c_str() );
+  _wputenv( ( L"QCA_PLUGIN_PATH=" + qtPluginPath + L";" + pluginPath ).c_str() );
+  _wputenv( ( L"QT_QPA_PLATFORM_PLUGIN_PATH=" + qtPluginPath + L"\\platforms" ).c_str() );
+  _wputenv( ( L"PYTHONHOME=" + pythonDir ).c_str() );
+  _wputenv( ( L"PYTHONPATH=" + prefixDir + L"\\python;" + pythonDir + L"\\Lib;" +
+              pythonDir + L"\\DLLs;" + pythonDir + L"\\Lib\\site-packages;" +
+              packageDir + L"\\python-support" ).c_str() );
+  _wputenv( L"PYTHONNOUSERSITE=1" );
+  _wputenv( ( L"GDAL_DATA=" + osgeoRoot + L"\\share\\gdal" ).c_str() );
+  _wputenv( ( L"PROJ_DATA=" + osgeoRoot + L"\\share\\proj" ).c_str() );
+  _wputenv( ( L"PROJ_LIB=" + osgeoRoot + L"\\share\\proj" ).c_str() );
+  _wputenv( ( L"PATH=" + path ).c_str() );
 }
 
 int CALLBACK WinMain( HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, LPSTR /*lpCmdLine*/, int /*nCmdShow*/ )

@@ -389,10 +389,12 @@ void QgsApplication::init( QString profileFolder )
 
   if ( profileFolder.isEmpty() )
   {
-    if ( getenv( "QGIS_CUSTOM_CONFIG_PATH" ) )
-    {
-      profileFolder = getenv( "QGIS_CUSTOM_CONFIG_PATH" );
-    }
+    // Use Qt's Unicode-aware environment access on Windows.  The C runtime
+    // getenv() API decodes values using the active code page, which corrupts
+    // portable installs located in paths containing non-ASCII characters.
+    const QString customConfigPath = qEnvironmentVariable( "QGIS_CUSTOM_CONFIG_PATH" );
+    if ( !customConfigPath.isEmpty() )
+      profileFolder = customConfigPath;
     else
     {
       profileFolder = QStandardPaths::standardLocations( QStandardPaths::AppDataLocation ).value( 0 );
@@ -434,8 +436,8 @@ void QgsApplication::init( QString profileFolder )
   }
   else
   {
-    char *prefixPath = getenv( "QGIS_PREFIX_PATH" );
-    if ( !prefixPath )
+    const QString prefixPath = qEnvironmentVariable( "QGIS_PREFIX_PATH" );
+    if ( prefixPath.isEmpty() )
     {
       if ( sPrefixPath()->isNull() )
       {
@@ -478,15 +480,17 @@ void QgsApplication::init( QString profileFolder )
   // 3 - use the default path from settings dir path, assume QSQLITE and add "qgis-auth.db"
   *sAuthDbDirPath() = qgisSettingsDirPath();
 
-  if ( getenv( "QGIS_AUTH_DB_DIR_PATH" ) )
+  const QString authDbDirPath = qEnvironmentVariable( "QGIS_AUTH_DB_DIR_PATH" );
+  if ( !authDbDirPath.isEmpty() )
   {
-    setAuthDatabaseDirPath( getenv( "QGIS_AUTH_DB_DIR_PATH" ) );
+    setAuthDatabaseDirPath( authDbDirPath );
     sAuthDbUri()->clear();
   }
 
-  if ( getenv( "QGIS_AUTH_DB_URI" ) )
+  const QString authDbUri = qEnvironmentVariable( "QGIS_AUTH_DB_URI" );
+  if ( !authDbUri.isEmpty() )
   {
-    *sAuthDbUri() = getenv( "QGIS_AUTH_DB_URI" );
+    *sAuthDbUri() = authDbUri;
   }
 
   // Default to sAuthDbDirPath
@@ -1071,9 +1075,10 @@ QString QgsApplication::resolvePkgPath()
     }
   }
 
-  if ( !appPath.isNull() || getenv( "QGIS_PREFIX_PATH" ) )
+  const QString prefixEnvironment = qEnvironmentVariable( "QGIS_PREFIX_PATH" );
+  if ( !appPath.isNull() || !prefixEnvironment.isEmpty() )
   {
-    QString prefix = getenv( "QGIS_PREFIX_PATH" ) ? getenv( "QGIS_PREFIX_PATH" ) : appPath;
+    QString prefix = !prefixEnvironment.isEmpty() ? prefixEnvironment : appPath;
 
     // check if QGIS is run from build directory (not the install directory)
     QFile f;
@@ -1101,8 +1106,8 @@ QString QgsApplication::resolvePkgPath()
   }
 
   QString prefixPath;
-  if ( getenv( "QGIS_PREFIX_PATH" ) )
-    prefixPath = getenv( "QGIS_PREFIX_PATH" );
+  if ( !prefixEnvironment.isEmpty() )
+    prefixPath = prefixEnvironment;
   else
   {
 #if defined( ANDROID )
@@ -1693,7 +1698,7 @@ void QgsApplication::exitQgis()
 
 QString QgsApplication::showSettings()
 {
-  QString myEnvironmentVar( getenv( "QGIS_PREFIX_PATH" ) );
+  const QString myEnvironmentVar = qEnvironmentVariable( "QGIS_PREFIX_PATH" );
   QString myState
     = tr(
         "QgsApplication state:\n"

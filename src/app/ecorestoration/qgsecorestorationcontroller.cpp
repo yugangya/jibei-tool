@@ -122,6 +122,7 @@
 #include <QPropertyAnimation>
 #include <QRegularExpression>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QSet>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -137,6 +138,8 @@
 #include <QTableWidgetItem>
 #include <QTableView>
 #include <QTextStream>
+#include <QTransform>
+#include <QtConcurrentRun>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -1627,6 +1630,9 @@ namespace
       {
         mPoints.clear();
         mLabels.clear();
+        mPressedButton = Qt::NoButton;
+        mPanning = false;
+        mSpacePressed = false;
         mHasHoverPoint = false;
         if ( mHoverBand )
           mHoverBand->reset( Qgis::GeometryType::Point );
@@ -1675,10 +1681,32 @@ namespace
         mPreviewBand->show();
       }
 
+      void canvasPressEvent( QgsMapMouseEvent *event ) override
+      {
+        if ( !event )
+          return;
+        mPressedButton = event->button();
+        mPressPosition = event->pos();
+        mPanning = event->button() == Qt::MiddleButton
+                   || ( mSpacePressed && event->button() == Qt::LeftButton );
+        if ( mPanning )
+        {
+          canvas()->setCursor( Qt::ClosedHandCursor );
+          canvas()->panActionStart( event->pos() );
+          event->accept();
+        }
+      }
+
       void canvasMoveEvent( QgsMapMouseEvent *event ) override
       {
         if ( !event )
           return;
+        if ( mPanning )
+        {
+          canvas()->panAction( event );
+          event->accept();
+          return;
+        }
         mHoverPoint = event->mapPoint();
         mHasHoverPoint = true;
         updateHoverBand();
@@ -1687,6 +1715,19 @@ namespace
       void canvasReleaseEvent( QgsMapMouseEvent *event ) override
       {
         if ( !event )
+          return;
+        const Qt::MouseButton pressedButton = mPressedButton;
+        mPressedButton = Qt::NoButton;
+        if ( mPanning )
+        {
+          canvas()->panActionEnd( event->pos() );
+          mPanning = false;
+          canvas()->setCursor( mSpacePressed ? Qt::OpenHandCursor : Qt::CrossCursor );
+          event->accept();
+          return;
+        }
+        if ( pressedButton != event->button()
+             || ( event->pos() - mPressPosition ).manhattanLength() > QApplication::startDragDistance() )
           return;
         if ( event->button() == Qt::LeftButton )
         {
@@ -1715,6 +1756,13 @@ namespace
 
       void keyPressEvent( QKeyEvent *event ) override
       {
+        if ( event->key() == Qt::Key_Space )
+        {
+          mSpacePressed = true;
+          canvas()->setCursor( Qt::OpenHandCursor );
+          event->accept();
+          return;
+        }
         if ( event->key() == Qt::Key_Escape )
         {
           resetSession();
@@ -1755,6 +1803,19 @@ namespace
           return;
         }
         QgsMapTool::keyPressEvent( event );
+      }
+
+      void keyReleaseEvent( QKeyEvent *event ) override
+      {
+        if ( event->key() == Qt::Key_Space )
+        {
+          mSpacePressed = false;
+          if ( !mPanning )
+            canvas()->setCursor( Qt::CrossCursor );
+          event->accept();
+          return;
+        }
+        QgsMapTool::keyReleaseEvent( event );
       }
 
     private:
@@ -1832,6 +1893,10 @@ namespace
       QVector<int> mLabels;
       QgsPointXY mHoverPoint;
       bool mHasHoverPoint = false;
+      QPoint mPressPosition;
+      Qt::MouseButton mPressedButton = Qt::NoButton;
+      bool mPanning = false;
+      bool mSpacePressed = false;
       QColor mPreviewStrokeColor = QColor( 56, 189, 248, 235 );
       QColor mPreviewFillColor = QColor( 56, 189, 248, 88 );
   };
@@ -1941,6 +2006,11 @@ namespace
 
   constexpr const char *sRecognitionTowerNumberField = "tower_no";
   constexpr const char *sRecognitionStatusField = "rec_status";
+  // Short names are intentional: ESRI Shapefile truncates field names to
+  // ten characters.  These fields retain the source tower feature binding
+  // needed for locating no-detection records without exposing it in the UI.
+  constexpr const char *sRecognitionTowerLayerField = "twr_layer";
+  constexpr const char *sRecognitionTowerFeatureField = "twr_fid";
 
   bool ensureProblemTowerNumberField( QgsVectorLayer *layer )
   {
@@ -2004,9 +2074,9 @@ namespace
         return true;
       bool added = false;
       if ( layer->isEditable() )
-        added = layer->addAttribute( QgsField( QLatin1String( name ), type, QString(), type == QMetaType::Type::QString ? 40 : 0 ) );
+        added = layer->addAttribute( QgsField( QLatin1String( name ), type, QString(), type == QMetaType::Type::QString ? ( qstrcmp( name, sRecognitionTowerLayerField ) == 0 ? 120 : 40 ) : 0 ) );
       else if ( layer->dataProvider() )
-        added = layer->dataProvider()->addAttributes( { QgsField( QLatin1String( name ), type, QString(), type == QMetaType::Type::QString ? 40 : 0 ) } );
+        added = layer->dataProvider()->addAttributes( { QgsField( QLatin1String( name ), type, QString(), type == QMetaType::Type::QString ? ( qstrcmp( name, sRecognitionTowerLayerField ) == 0 ? 120 : 40 ) : 0 ) } );
       if ( added )
         layer->updateFields();
       return layer->fields().indexFromName( QLatin1String( name ) ) >= 0;
@@ -2014,6 +2084,8 @@ namespace
 
     const bool towerOk = ensureProblemTowerNumberField( layer );
     const bool statusOk = ensureField( sRecognitionStatusField, QMetaType::Type::QString );
+    const bool towerLayerOk = ensureField( sRecognitionTowerLayerField, QMetaType::Type::QString );
+    const bool towerFeatureOk = ensureField( sRecognitionTowerFeatureField, QMetaType::Type::QString );
     const int towerIndex = layer->fields().indexFromName( QLatin1String( sRecognitionTowerNumberField ) );
     const int statusIndex = layer->fields().indexFromName( QLatin1String( sRecognitionStatusField ) );
     if ( towerIndex >= 0 )
@@ -2026,7 +2098,26 @@ namespace
       const QVariantList values = { QVariantMap { { hasResult, hasResult } }, QVariantMap { { noResult, noResult } } };
       layer->setEditorWidgetSetup( statusIndex, QgsEditorWidgetSetup( QStringLiteral( "ValueMap" ), QVariantMap { { QStringLiteral( "map" ), values } } ) );
     }
-    return towerOk && statusOk;
+    // Binding fields are implementation metadata and should not clutter the
+    // result table or the native attribute form.
+    for ( const char *name : { sRecognitionTowerLayerField, sRecognitionTowerFeatureField } )
+    {
+      const int index = layer->fields().indexFromName( QLatin1String( name ) );
+      if ( index >= 0 )
+      {
+        layer->setEditorWidgetSetup( index, QgsEditorWidgetSetup( QStringLiteral( "Hidden" ), QVariantMap() ) );
+        QgsAttributeTableConfig config = layer->attributeTableConfig();
+        config.update( layer->fields() );
+        QVector<QgsAttributeTableConfig::ColumnConfig> columns = config.columns();
+        if ( index < columns.size() )
+        {
+          columns[index].hidden = true;
+          config.setColumns( columns );
+          layer->setAttributeTableConfig( config );
+        }
+      }
+    }
+    return towerOk && statusOk && towerLayerOk && towerFeatureOk;
   }
 
   bool isRecognitionResultTableLayer( const QgsVectorLayer *layer )
@@ -2733,9 +2824,9 @@ namespace
   const QString sProjectRootGroupName = QStringLiteral( "工程" );
   const QString sCommonGroup = QStringLiteral( "00 公共数据" );
   const QString sLineGroup = QStringLiteral( "01 杆塔与线路" );
-  const QString sScopeGroup = QStringLiteral( "02 调查范围" );
+  const QString sLegacyScopeGroup = QStringLiteral( "02 调查范围" );
   const QString sPhaseResultsGroup = QStringLiteral( "01 解译成果" );
-  const QString sPhaseScreenshotsGroup = QStringLiteral( "02 截图成果" );
+  const QString sLegacyPhaseScreenshotsGroup = QStringLiteral( "02 截图成果" );
   const QString sImageryGroup = QStringLiteral( "03 影像数据" );
   const QString sRecognitionGroup = QStringLiteral( "01 扰动识别成果" );
   // Result groups are kept as stable, phase-scoped business buckets.  The
@@ -2795,6 +2886,54 @@ namespace
     source->removeChildNode( node );
   }
 
+  void promoteLegacyBusinessGroupChildren( QgsLayerTreeGroup *parent, const QString &groupType, const QStringList &legacyNames )
+  {
+    if ( !parent )
+      return;
+
+    // Retiring a business bucket must never remove its project layers or
+    // files. Keep a live cloned node before removing the old one, matching
+    // QGIS's registry-bridge-safe tree move convention.
+    const QList<QgsLayerTreeNode *> children = parent->children();
+    for ( QgsLayerTreeNode *node : children )
+    {
+      QgsLayerTreeGroup *legacy = qobject_cast<QgsLayerTreeGroup *>( node );
+      if ( !legacy || ( legacy->customProperty( sGroupTypeProperty ).toString() != groupType
+                       && !legacyNames.contains( legacy->name() ) ) )
+        continue;
+
+      const bool legacyChecked = legacy->itemVisibilityChecked();
+      if ( groupType == QLatin1String( "phase-screenshots" ) )
+      {
+        const QString archivePhaseId = parent->customProperty( sPhaseIdProperty ).toString().trimmed();
+        for ( QgsLayerTreeLayer *layerNode : legacy->findLayers() )
+        {
+          // During project loading tree references may not yet resolve to a
+          // map layer. Persist the archive flag on the node as well, so the
+          // later layers-added pass can complete the layer metadata safely.
+          layerNode->setCustomProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), true );
+          if ( QgsMapLayer *layer = layerNode->layer() )
+          {
+            layer->setCustomProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), true );
+            if ( !archivePhaseId.isEmpty() )
+              layer->setCustomProperty( sPhaseIdProperty, archivePhaseId );
+          }
+        }
+      }
+      const QList<QgsLayerTreeNode *> legacyChildren = legacy->children();
+      for ( QgsLayerTreeNode *child : legacyChildren )
+      {
+        QgsLayerTreeNode *clone = child->clone();
+        // A hidden bucket's contents must stay hidden after promotion.
+        if ( !legacyChecked )
+          clone->setItemVisibilityChecked( false );
+        parent->addChildNode( clone );
+        legacy->removeChildNode( child );
+      }
+      parent->removeChildNode( legacy );
+    }
+  }
+
   void ensureChildNodeOrder( QgsLayerTreeGroup *parent, const QList<QgsLayerTreeNode *> &orderedNodes )
   {
     if ( !parent )
@@ -2837,7 +2976,7 @@ namespace
 
   void ensurePhaseChildGroupOrder( QgsLayerTreeGroup *phaseGroup )
   {
-    ensureChildGroupOrder( phaseGroup, { sPhaseResultsGroup, sPhaseScreenshotsGroup, sImageryGroup } );
+    ensureChildGroupOrder( phaseGroup, { sPhaseResultsGroup, sImageryGroup } );
   }
 
   void collectVisibleSpatialLayers( QgsLayerTreeNode *node, QList<QgsMapLayer *> &layers )
@@ -2904,6 +3043,208 @@ namespace
     }
     return geometry.asPoint();
   }
+
+  int strictRecognitionTowerField( const QgsFields &fields )
+  {
+    const QStringList candidates = {
+      QStringLiteral( "tower_name" ), QStringLiteral( "towerName" ), QStringLiteral( "Name" )
+    };
+    for ( const QString &candidate : candidates )
+    {
+      const int index = fields.indexFromName( candidate );
+      if ( index >= 0 )
+        return index;
+    }
+    return -1;
+  }
+
+  QString strictRecognitionTowerLabel( const QgsFeature &feature, const QgsFields &fields )
+  {
+    const int index = strictRecognitionTowerField( fields );
+    return index >= 0 ? feature.attribute( index ).toString().trimmed() : QString();
+  }
+
+  struct EcoTowerChoice
+  {
+    QString number;
+    QString layerId;
+    QString featureId;
+  };
+
+  class EcoRecognitionTowerComboBox final : public QComboBox
+  {
+    public:
+      using QComboBox::QComboBox;
+
+      void showPopup() override
+      {
+        setProperty( "ecoPopupOpen", true );
+        // Keep the popup aligned with the result column. The editor itself is
+        // already constrained by the delegate cell geometry.
+        if ( view() && width() > 0 )
+        {
+          view()->setMinimumWidth( width() );
+          view()->setMaximumWidth( width() );
+        }
+        QComboBox::showPopup();
+        if ( view() && width() > 0 )
+          view()->window()->setFixedWidth( width() );
+      }
+
+      void hidePopup() override
+      {
+        QComboBox::hidePopup();
+        setProperty( "ecoPopupOpen", false );
+      }
+  };
+
+  class EcoRecognitionTowerDelegate final : public QStyledItemDelegate
+  {
+    public:
+      using Choices = std::function<QList<EcoTowerChoice>()>;
+      using Save = std::function<void( const QString &, qint64, const QString &, const QString &, const QString & )>;
+      EcoRecognitionTowerDelegate( Choices choices, Save save, QObject *parent )
+        : QStyledItemDelegate( parent ), mChoices( std::move( choices ) ), mSave( std::move( save ) ) {}
+
+      QWidget *createEditor( QWidget *parent, const QStyleOptionViewItem &, const QModelIndex &index ) const override
+      {
+        EcoRecognitionTowerComboBox *combo = new EcoRecognitionTowerComboBox( parent );
+        combo->setObjectName( QStringLiteral( "EcoRecognitionTowerEditor" ) );
+        combo->setEditable( true );
+        combo->setInsertPolicy( QComboBox::NoInsert );
+        combo->setCompleter( nullptr );
+        // The editor is laid out into the table cell by updateEditorGeometry.
+        // Do not impose a wider minimum than the result column itself.
+        combo->setMinimumWidth( 0 );
+        combo->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
+        combo->setProperty( "resultLayer", index.sibling( index.row(), 0 ).data( Qt::UserRole ) );
+        combo->setProperty( "resultFid", index.sibling( index.row(), 0 ).data( Qt::UserRole + 1 ) );
+        for ( const EcoTowerChoice &choice : mChoices() )
+        {
+          combo->addItem( choice.number, choice.layerId );
+          combo->setItemData( combo->count() - 1, choice.featureId, Qt::UserRole + 1 );
+        }
+        EcoRecognitionTowerDelegate *delegate = const_cast<EcoRecognitionTowerDelegate *>( this );
+        const auto commitEditor = [this, delegate, combo]( bool defer ) {
+          if ( combo->property( "ecoCommitSent" ).toBool() )
+            return;
+          combo->setProperty( "ecoCommitSent", true );
+          const auto saveAndClose = [this, delegate, combo] {
+            const QString text = combo->lineEdit() ? combo->lineEdit()->text().trimmed() : combo->currentText().trimmed();
+            QString selectedTowerLayer = combo->property( "towerLayer" ).toString();
+            QString selectedTowerFid = combo->property( "towerFid" ).toString();
+            if ( !combo->property( "ecoTyped" ).toBool() && combo->currentIndex() >= 0 )
+            {
+              selectedTowerLayer = combo->itemData( combo->currentIndex() ).toString();
+              selectedTowerFid = combo->itemData( combo->currentIndex(), Qt::UserRole + 1 ).toString();
+            }
+            combo->setProperty( "ecoDirectSaved", true );
+            mSave( combo->property( "resultLayer" ).toString(), combo->property( "resultFid" ).toLongLong(),
+                   text, selectedTowerLayer, selectedTowerFid );
+            emit delegate->closeEditor( combo, QAbstractItemDelegate::NoHint );
+          };
+          if ( defer )
+            QTimer::singleShot( 0, combo, saveAndClose );
+          else
+            saveAndClose();
+        };
+        connect( combo, QOverload<int>::of( &QComboBox::activated ), combo, [combo, commitEditor]( int selected ) {
+          combo->setProperty( "towerLayer", combo->itemData( selected ) );
+          combo->setProperty( "towerFid", combo->itemData( selected, Qt::UserRole + 1 ) );
+          // QComboBox does not automatically commit an item delegate editor
+          // when an item is activated. Explicitly commit and close it so the
+          // selected number is written back to the QTableWidget cell.
+          commitEditor( true );
+        } );
+        connect( combo, QOverload<int>::of( &QComboBox::currentIndexChanged ), combo, [combo, commitEditor]( int selected ) {
+          if ( selected < 0 || combo->property( "ecoTyped" ).toBool() || combo->property( "ecoCommitSent" ).toBool() )
+            return;
+          combo->setProperty( "towerLayer", combo->itemData( selected ) );
+          combo->setProperty( "towerFid", combo->itemData( selected, Qt::UserRole + 1 ) );
+          // Some Qt styles close the popup without emitting activated(). The
+          // index change is the authoritative selection signal in that case.
+          commitEditor( true );
+        } );
+        connect( combo->view(), &QAbstractItemView::clicked, combo, [combo, commitEditor]( const QModelIndex &index ) {
+          if ( !index.isValid() || combo->property( "ecoCommitSent" ).toBool() )
+            return;
+          combo->setCurrentIndex( index.row() );
+          combo->setEditText( combo->itemText( index.row() ) );
+          combo->setProperty( "towerLayer", combo->itemData( index.row() ) );
+          combo->setProperty( "towerFid", combo->itemData( index.row(), Qt::UserRole + 1 ) );
+          commitEditor( true );
+        } );
+        connect( combo->lineEdit(), &QLineEdit::textEdited, combo, [combo] {
+          // Typed values are deliberately unbound, even if their text happens
+          // to equal a known tower. Only a dropdown selection supplies a point.
+          combo->setProperty( "towerLayer", QString() );
+          combo->setProperty( "towerFid", QString() );
+          combo->setProperty( "ecoTyped", true );
+        } );
+        connect( combo->lineEdit(), &QLineEdit::returnPressed, combo, [commitEditor] { commitEditor( true ); } );
+        connect( combo->lineEdit(), &QLineEdit::editingFinished, combo, [combo, commitEditor] {
+          // Closing a popup can emit editingFinished before activated(). Let
+          // the popup's selection handlers own that transaction.
+          if ( combo->property( "ecoPopupOpen" ).toBool() )
+            return;
+          commitEditor( true );
+        } );
+        return combo;
+      }
+
+      void setEditorData( QWidget *editor, const QModelIndex &index ) const override
+      {
+        QComboBox *combo = qobject_cast<QComboBox *>( editor );
+        if ( !combo )
+          return;
+        const QSignalBlocker blocker( combo );
+        combo->setProperty( "ecoCommitSent", false );
+        combo->setProperty( "ecoTyped", false );
+        combo->setProperty( "ecoDirectSaved", false );
+        combo->setProperty( "ecoPopupOpen", false );
+        combo->setCurrentIndex( -1 );
+        combo->setEditText( index.data( Qt::EditRole ).toString() );
+        combo->setProperty( "towerLayer", index.data( Qt::UserRole + 3 ) );
+        combo->setProperty( "towerFid", index.data( Qt::UserRole + 4 ) );
+        combo->lineEdit()->selectAll();
+      }
+
+      void setModelData( QWidget *editor, QAbstractItemModel *, const QModelIndex & ) const override
+      {
+        QComboBox *combo = qobject_cast<QComboBox *>( editor );
+        if ( combo )
+        {
+          if ( combo->property( "ecoDirectSaved" ).toBool() )
+            return;
+          const QString text = combo->lineEdit() ? combo->lineEdit()->text().trimmed() : combo->currentText().trimmed();
+          QString selectedTowerLayer = combo->property( "towerLayer" ).toString();
+          QString selectedTowerFid = combo->property( "towerFid" ).toString();
+          // Keyboard navigation and automated accessibility clients may move
+          // the current item without emitting activated(). Preserve the
+          // source binding in that case as well; free text remains unbound.
+          if ( !combo->property( "ecoTyped" ).toBool() && combo->currentIndex() >= 0 )
+          {
+            selectedTowerLayer = combo->itemData( combo->currentIndex() ).toString();
+            selectedTowerFid = combo->itemData( combo->currentIndex(), Qt::UserRole + 1 ).toString();
+          }
+          // The vector layer is the authoritative model. Writing table roles
+          // one by one emits dataChanged(), which reloads this editor from the
+          // old cell and loses its new text/binding. Persist once, then let the
+          // queued layer refresh repopulate the cell from the saved feature.
+          mSave( combo->property( "resultLayer" ).toString(), combo->property( "resultFid" ).toLongLong(),
+                 text, selectedTowerLayer, selectedTowerFid );
+        }
+      }
+
+      void updateEditorGeometry( QWidget *editor, const QStyleOptionViewItem &option, const QModelIndex & ) const override
+      {
+        editor->setGeometry( option.rect );
+      }
+
+    private:
+      Choices mChoices;
+      Save mSave;
+  };
 
   QString featureLabel( const QgsFeature &feature, const QgsFields &fields, qint64 fallbackIndex )
   {
@@ -3390,6 +3731,8 @@ QgsEcoRestorationController::QgsEcoRestorationController( QgisApp *app )
       Q_UNUSED( oldTool )
       if ( mProjectTransitionInProgress )
         return;
+      if ( newTool == mSmartSegmentationTool || newTool == mRecognitionExtentTool )
+        mRecognitionEditingMapTool = nullptr;
       if ( mSmartSegmentationTool && newTool != mSmartSegmentationTool )
       {
         if ( EcoSam2PromptMapTool *tool = static_cast<EcoSam2PromptMapTool *>( mSmartSegmentationTool.data() ) )
@@ -3403,6 +3746,13 @@ QgsEcoRestorationController::QgsEcoRestorationController( QgisApp *app )
         mSmartSegmentationFeatureId = -1;
         mSmartSegmentationStandalone = true;
         mSmartSegmentationOutputCrs = QgsCoordinateReferenceSystem();
+        mSmartSegmentationSessionRasterLayerId.clear();
+        mSmartSegmentationSessionPhaseId.clear();
+        mSmartSegmentationRasterPinned = false;
+        ++mSmartSegmentationRequestRevision;
+        mSmartSegmentationPreviewRunning = false;
+        mSmartSegmentationLatestPoints.clear();
+        mSmartSegmentationLatestLabels.clear();
         mSmartSegmentationPreviousMapTool = nullptr;
         hideSmartSegmentationClassificationPanel();
         if ( mSmartSegmentationDock )
@@ -3751,7 +4101,7 @@ QWidget *QgsEcoRestorationController::createProjectPage()
   QPushButton *comparePhaseButton = new QPushButton( tr( "期次对比" ) );
   phaseRow->addWidget( comparePhaseButton );
   phaseLayout->addLayout( phaseRow );
-  QLabel *phaseHint = new QLabel( tr( "工程下以“期次”为组织单元；杆塔与线路属于公共数据，影像、识别和截图成果按期次归档。建议在左侧工程树上对期次节点直接右键操作。" ) );
+  QLabel *phaseHint = new QLabel( tr( "工程下以“期次”为组织单元；杆塔、线路和其他矢量属于公共数据，影像与解译成果按期次归档。批量截图导出到用户选择的目录。建议在左侧工程树上对期次节点直接右键操作。" ) );
   phaseHint->setWordWrap( true );
   phaseHint->setProperty( "muted", true );
   phaseLayout->addWidget( phaseHint );
@@ -4188,7 +4538,17 @@ void QgsEcoRestorationController::createToolbar()
   auto addNavigationAction = [this]( EcoToolbarIcon icon, const QString &text, QAction *source ) {
     QAction *action = mToolbar->addAction( ecoToolbarIcon( icon ), text );
     action->setCheckable( source->isCheckable() );
-    connect( action, &QAction::triggered, source, &QAction::trigger );
+    if ( source == mApp->actionPan() )
+    {
+      action->setToolTip( tr( "拖动地图平移；编辑图斑时再次点击可返回编辑。也可按住空格或鼠标中键临时平移。" ) );
+      connect( action, &QAction::triggered, this, [this, source]( bool checked ) {
+        if ( !checked && resumeRecognitionEditingMapTool() )
+          return;
+        source->trigger();
+      } );
+    }
+    else
+      connect( action, &QAction::triggered, source, &QAction::trigger );
     connect( source, &QAction::toggled, action, &QAction::setChecked );
     return action;
   };
@@ -4354,6 +4714,7 @@ void QgsEcoRestorationController::createBusinessProject()
   mRecognitionEditingTowerLabel.clear();
   mRecognitionEditingLayerId.clear();
   mRecognitionEditingFeatureId = -1;
+  mRecognitionEditingMapTool = nullptr;
   mManualTowerDrawingLayerId.clear();
   mRecognitionPreviousMapTool = nullptr;
   if ( mRecognitionProgressBar )
@@ -4459,7 +4820,6 @@ void QgsEcoRestorationController::createBusinessProject()
 
   ensureBusinessGroups();
   syncBusinessProjectView();
-  showMessage( tr( "工程已创建" ), tr( "已创建标准工程目录并保存：\n%1" ).arg( projectFile ) );
 }
 
 void QgsEcoRestorationController::importImagery( const QString &targetPhaseId )
@@ -4871,7 +5231,7 @@ void QgsEcoRestorationController::importVectors()
       if ( QgsLayerTreeLayer *treeNode = group->findLayer( rawLayer->id() ) )
       {
         treeNode->setExpanded( false );
-        treeNode->setItemVisibilityChecked( true );
+        treeNode->setItemVisibilityCheckedParentRecursive( true );
       }
       ecoImportTrace( QStringLiteral( "after vector attach tree layerId=%1" ).arg( rawLayer->id() ) );
     }
@@ -4960,7 +5320,7 @@ void QgsEcoRestorationController::importTowerVectors()
       if ( QgsLayerTreeLayer *treeNode = group->findLayer( rawLayer->id() ) )
       {
         treeNode->setExpanded( false );
-        treeNode->setItemVisibilityChecked( true );
+        treeNode->setItemVisibilityCheckedParentRecursive( true );
       }
       ecoImportTrace( QStringLiteral( "after tower attach tree layerId=%1" ).arg( rawLayer->id() ) );
     }
@@ -5014,7 +5374,7 @@ void QgsEcoRestorationController::createManualVectorLayer( const QString &kind )
     filePrefix = QStringLiteral( "point_manual" );
     layerName = tr( "手工普通点" );
     category = QStringLiteral( "manual-point" );
-    groupName = sScopeGroup;
+    groupName = sCommonGroup;
   }
   else if ( kind == QLatin1String( "tower" ) )
   {
@@ -5044,7 +5404,7 @@ void QgsEcoRestorationController::createManualVectorLayer( const QString &kind )
     filePrefix = QStringLiteral( "scope_manual" );
     layerName = tr( "手工调查范围" );
     category = QStringLiteral( "manual-scope" );
-    groupName = sScopeGroup;
+    groupName = sCommonGroup;
     fields.append( QgsField( QStringLiteral( "area_type" ), QMetaType::Type::QString, QString(), 40 ) );
     fields.append( QgsField( QStringLiteral( "area_name" ), QMetaType::Type::QString, QString(), 80 ) );
   }
@@ -5110,7 +5470,7 @@ void QgsEcoRestorationController::createManualVectorLayer( const QString &kind )
     if ( QgsLayerTreeLayer *treeNode = group->findLayer( rawLayer->id() ) )
     {
       treeNode->setExpanded( false );
-      treeNode->setItemVisibilityChecked( true );
+      treeNode->setItemVisibilityCheckedParentRecursive( true );
     }
   }
   else if ( QgsLayerTreeGroup *fallback = QgsProject::instance()->layerTreeRoot()->findGroup( groupName ) )
@@ -5121,7 +5481,7 @@ void QgsEcoRestorationController::createManualVectorLayer( const QString &kind )
     if ( QgsLayerTreeLayer *treeNode = fallback->findLayer( rawLayer->id() ) )
     {
       treeNode->setExpanded( false );
-      treeNode->setItemVisibilityChecked( true );
+      treeNode->setItemVisibilityCheckedParentRecursive( true );
     }
   }
   QgsProject::instance()->setDirty( true );
@@ -5317,8 +5677,9 @@ void QgsEcoRestorationController::runTowerRecognition()
     return;
 
   QStringList labels;
+  QStringList towerFeatureIds;
   ecoImportTrace( QStringLiteral( "runTowerRecognition before extents" ) );
-  const QVector<QgsRectangle> extents = towerRecognitionExtents( towerLayer, rasterLayer->crs(), &labels );
+  const QVector<QgsRectangle> extents = towerRecognitionExtents( towerLayer, rasterLayer->crs(), &labels, &towerFeatureIds );
   ecoImportTrace( QStringLiteral( "runTowerRecognition extents=%1 labels=%2" ).arg( extents.size() ).arg( labels.size() ) );
   if ( extents.isEmpty() )
   {
@@ -5326,14 +5687,16 @@ void QgsEcoRestorationController::runTowerRecognition()
     return;
   }
   ecoImportTrace( QStringLiteral( "runTowerRecognition before runRecognition" ) );
-  runRecognition( extents, labels, towerLayer->id() );
+  runRecognition( extents, labels, towerLayer->id(), rasterLayer->id(), towerFeatureIds );
 }
 
-QVector<QgsRectangle> QgsEcoRestorationController::towerRecognitionExtents( QgsVectorLayer *towerLayer, const QgsCoordinateReferenceSystem &targetCrs, QStringList *labels ) const
+QVector<QgsRectangle> QgsEcoRestorationController::towerRecognitionExtents( QgsVectorLayer *towerLayer, const QgsCoordinateReferenceSystem &targetCrs, QStringList *labels, QStringList *towerFeatureIds ) const
 {
   QVector<QgsRectangle> extents;
   if ( labels )
     labels->clear();
+  if ( towerFeatureIds )
+    towerFeatureIds->clear();
   if ( !towerLayer || !targetCrs.isValid() || !mRecognitionRangeSpin )
     return extents;
 
@@ -5349,10 +5712,8 @@ QVector<QgsRectangle> QgsEcoRestorationController::towerRecognitionExtents( QgsV
 
   QgsFeature feature;
   QgsFeatureIterator iterator = towerLayer->getFeatures();
-  qint64 featureIndex = 0;
   while ( iterator.nextFeature( feature ) )
   {
-    ++featureIndex;
     QgsPointXY center = featurePoint( feature.geometry() );
     if ( center.isEmpty() )
       continue;
@@ -5378,7 +5739,9 @@ QVector<QgsRectangle> QgsEcoRestorationController::towerRecognitionExtents( QgsV
       continue;
     extents.append( extent );
     if ( labels )
-      labels->append( featureLabel( feature, towerLayer->fields(), featureIndex ) );
+      labels->append( strictRecognitionTowerLabel( feature, towerLayer->fields() ) );
+    if ( towerFeatureIds )
+      towerFeatureIds->append( QString::number( feature.id() ) );
   }
   return extents;
 }
@@ -5447,35 +5810,50 @@ void QgsEcoRestorationController::startExtentRecognition()
     mSmartSegmentationAction->setChecked( false );
   }
 
-  QgsRasterLayer *rasterLayer = mRecognitionRasterCombo
-                                  ? qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( mRecognitionRasterCombo->currentData().toString() ) )
-                                  : nullptr;
-  if ( !rasterLayer )
+  QgsRasterLayer *rasterLayer = qobject_cast<QgsRasterLayer *>( mApp->activeLayer() );
+  QgsLayerTreeLayer *activeNode = rasterLayer ? QgsProject::instance()->layerTreeRoot()->findLayer( rasterLayer->id() ) : nullptr;
+  if ( !rasterLayer || !rasterLayer->isValid() || !activeNode || !activeNode->isVisible() )
+    rasterLayer = selectedRecognitionRasterLayer();
+  if ( !rasterLayer || !rasterLayer->isValid() )
   {
     showMessage( tr( "框选范围识别" ), tr( "请先选择用于识别的 TIF 影像。" ), true );
+    cancelExtentRecognition();
     return;
   }
+  // Keep a manual selection in its starting phase. Other visible tiles in
+  // that phase may cover the rectangle, but another phase must never be used.
+  mRecognitionExtentRasterLayerId = rasterLayer->id();
+  mRecognitionExtentPhaseId = layerPhaseIdForLayer( rasterLayer );
+  if ( mRecognitionExtentPhaseId.isEmpty() )
+    mRecognitionExtentPhaseId = currentPhaseId();
   if ( !mRecognitionExtentTool )
   {
     mRecognitionExtentTool = new QgsMapToolExtent( mApp->mapCanvas() );
     connect( mRecognitionExtentTool, &QgsMapToolExtent::extentChanged, this, [this]( const QgsRectangle &canvasExtent ) {
-      QgsRasterLayer *selectedRaster = mRecognitionRasterCombo
-                                         ? qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( mRecognitionRasterCombo->currentData().toString() ) )
-                                         : nullptr;
-      if ( !selectedRaster || canvasExtent.isEmpty() )
+      if ( canvasExtent.isEmpty() || !canvasExtent.isFinite() )
         return;
       QgsRectangle rasterExtent;
-      try
+      QgsRasterLayer *selectedRaster = rasterForExtentRecognition( canvasExtent, &rasterExtent );
+      if ( !selectedRaster )
       {
-        QgsCoordinateTransform transform( mApp->mapCanvas()->mapSettings().destinationCrs(), selectedRaster->crs(), QgsProject::instance()->transformContext() );
-        rasterExtent = transform.transformBoundingBox( canvasExtent );
-      }
-      catch ( const QgsCsException & )
-      {
-        showMessage( tr( "框选范围识别" ), tr( "框选范围无法转换到影像坐标系。" ), true );
+        showMessage( tr( "框选范围识别" ), tr( "框选范围没有与所选期次的可见影像相交。请勾选覆盖该范围的 TIF，并确认影像坐标系和期次；不会自动使用其他期次。" ), true );
         cancelExtentRecognition();
         return;
       }
+      const QString sourceRasterId = selectedRaster->id();
+      if ( mRecognitionRasterCombo )
+      {
+        const int sourceIndex = mRecognitionRasterCombo->findData( sourceRasterId );
+        if ( sourceIndex >= 0 )
+        {
+          const QSignalBlocker blocker( mRecognitionRasterCombo );
+          mRecognitionRasterCombo->setCurrentIndex( sourceIndex );
+        }
+      }
+      ecoImportTrace( QStringLiteral( "manual extent resolved raster=%1 name=%2 phase=%3 canvasCrs=%4 rasterCrs=%5 canvasExtent=%6 rasterExtent=%7" )
+                        .arg( sourceRasterId, selectedRaster->name(), layerPhaseIdForLayer( selectedRaster ),
+                              mApp->mapCanvas()->mapSettings().destinationCrs().authid(), selectedRaster->crs().authid(),
+                              canvasExtent.toString(), rasterExtent.toString() ) );
       if ( mRecognitionPreviousMapTool )
         mApp->mapCanvas()->setMapTool( mRecognitionPreviousMapTool );
       else
@@ -5488,9 +5866,9 @@ void QgsEcoRestorationController::startExtentRecognition()
         mExtentRecognitionAction->setChecked( false );
       }
       if ( mRecognitionSelectionLabel )
-        mRecognitionSelectionLabel->setText( tr( "已框选范围，正在启动塔基扰动识别..." ) );
-      QTimer::singleShot( 0, this, [this, rasterExtent] {
-        runRecognition( { rasterExtent }, { tr( "地图框选范围" ) } );
+        mRecognitionSelectionLabel->setText( tr( "已框选范围，使用影像“%1”启动识别…" ).arg( selectedRaster->name() ) );
+      QTimer::singleShot( 0, this, [this, rasterExtent, sourceRasterId] {
+        runRecognition( { rasterExtent }, { tr( "地图框选范围" ) }, QString(), sourceRasterId );
       } );
     } );
   }
@@ -5537,6 +5915,7 @@ void QgsEcoRestorationController::deleteSmartSegmentationPendingFeature()
   mSmartSegmentationPendingScore = 0.0;
   mSmartSegmentationPendingPhaseId.clear();
   mSmartSegmentationPendingRasterLayerId.clear();
+  ++mSmartSegmentationRequestRevision;
   if ( EcoSam2PromptMapTool *tool = mSmartSegmentationTool ? static_cast<EcoSam2PromptMapTool *>( mSmartSegmentationTool.data() ) : nullptr )
     tool->resetSession();
   hideSmartSegmentationClassificationPanel();
@@ -5726,6 +6105,8 @@ void QgsEcoRestorationController::commitSmartSegmentationClassified()
   layer->updateExtents();
   applyBusinessStyle( layer );
   moveLayerToBusinessGroup( layer, layer->customProperty( QStringLiteral( "eco/resultGroup" ) ).toString() );
+  if ( QgsLayerTreeLayer *node = QgsProject::instance()->layerTreeRoot()->findLayer( layer->id() ) )
+    node->setItemVisibilityCheckedParentRecursive( true );
   layer->triggerRepaint();
   QgsProject::instance()->setDirty( true );
   mRecognitionResultLayerId = layer->id();
@@ -5743,6 +6124,9 @@ void QgsEcoRestorationController::commitSmartSegmentationClassified()
 
 void QgsEcoRestorationController::startSmartSegmentation()
 {
+  if ( !mApp || !mApp->mapCanvas() )
+    return;
+
   // Do not retain the extent tool as the previous tool for SAM.
   if ( mRecognitionExtentTool && mApp->mapCanvas()->mapTool() == mRecognitionExtentTool )
     cancelExtentRecognition();
@@ -5770,7 +6154,10 @@ void QgsEcoRestorationController::startSmartSegmentation()
     return;
   }
 
-  QgsRasterLayer *rasterLayer = selectedRecognitionRasterLayer();
+  mSmartSegmentationSessionRasterLayerId.clear();
+  mSmartSegmentationSessionPhaseId.clear();
+  mSmartSegmentationRasterPinned = false;
+  QgsRasterLayer *rasterLayer = smartSegmentationRasterLayer();
   if ( !rasterLayer )
   {
     if ( mSmartSegmentationAction )
@@ -5838,6 +6225,14 @@ void QgsEcoRestorationController::startSmartSegmentation()
   mSmartSegmentationPendingPhaseId.clear();
   mSmartSegmentationPendingRasterLayerId.clear();
   hideSmartSegmentationClassificationPanel();
+  mSmartSegmentationSessionRasterLayerId = rasterLayer->id();
+  mSmartSegmentationSessionPhaseId = layerPhaseIdForLayer( rasterLayer );
+  if ( mSmartSegmentationSessionPhaseId.isEmpty() )
+    mSmartSegmentationSessionPhaseId = currentPhaseId();
+  mSmartSegmentationRasterPinned = true;
+  ++mSmartSegmentationRequestRevision;
+  mSmartSegmentationLatestPoints.clear();
+  mSmartSegmentationLatestLabels.clear();
   mSmartSegmentationOutputCrs = layer ? layer->crs() : QgsProject::instance()->crs();
   if ( !mSmartSegmentationOutputCrs.isValid() )
     mSmartSegmentationOutputCrs = rasterLayer->crs();
@@ -5876,6 +6271,7 @@ void QgsEcoRestorationController::startSmartSegmentation()
   else
     mApp->setActiveLayer( rasterLayer );
   mApp->mapCanvas()->setMapTool( tool );
+  mApp->mapCanvas()->setFocus();
   if ( mSmartSegmentationAction )
   {
     const QSignalBlocker blocker( mSmartSegmentationAction );
@@ -5948,17 +6344,39 @@ void QgsEcoRestorationController::startSmartSegmentationForLayer( const QString 
 
 void QgsEcoRestorationController::previewSmartSegmentationPrompt( const QVector<QgsPointXY> &canvasPoints, const QVector<int> &promptLabels )
 {
-  if ( !mApp )
+  if ( !mApp || !mApp->mapCanvas() || mApp->mapCanvas()->mapTool() != mSmartSegmentationTool )
     return;
+
+  const quint64 revision = ++mSmartSegmentationRequestRevision;
+  mSmartSegmentationLatestPoints = canvasPoints;
+  mSmartSegmentationLatestLabels = promptLabels;
+  mSmartSegmentationPendingGeometry = QgsGeometry();
+  mSmartSegmentationPendingScore = 0.0;
+  mSmartSegmentationPendingPhaseId.clear();
+  mSmartSegmentationPendingRasterLayerId.clear();
+  hideSmartSegmentationClassificationPanel();
+  if ( mSmartSegmentationPreviewRunning )
+  {
+    if ( mSmartSegmentationStatusLabel )
+      mSmartSegmentationStatusLabel->setText( tr( "已接收 %1 个提示点，当前任务结束后更新预览…" ).arg( canvasPoints.size() ) );
+    return;
+  }
+
+  const auto notifyFailure = [this]( const QString &message ) {
+    if ( mSmartSegmentationStatusLabel )
+      mSmartSegmentationStatusLabel->setText( message );
+    if ( mApp && mApp->statusBar() )
+      mApp->statusBar()->showMessage( message, 6500 );
+    ecoImportTrace( QStringLiteral( "map SAM2 failed: %1" ).arg( message ) );
+  };
 
   QgsVectorLayer *resultLayer = mSmartSegmentationTargetLayerId.isEmpty()
                                   ? nullptr
                                   : qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mSmartSegmentationTargetLayerId ) );
-  QgsRasterLayer *rasterLayer = selectedRecognitionRasterLayer();
+  QgsRasterLayer *rasterLayer = smartSegmentationRasterLayer();
   if ( !rasterLayer || ( !mSmartSegmentationStandalone && !resultLayer ) )
   {
-    if ( mApp->statusBar() )
-      mApp->statusBar()->showMessage( tr( "智能分割需要先加载并选择一幅影像。" ), 4500 );
+    notifyFailure( tr( "智能分割的影像或成果图层已隐藏或移除，请重新选择可见影像并启动。" ) );
     return;
   }
   if ( canvasPoints.isEmpty() )
@@ -5996,8 +6414,12 @@ void QgsEcoRestorationController::previewSmartSegmentationPrompt( const QVector<
   }
   catch ( const QgsCsException & )
   {
-    if ( mApp->statusBar() )
-      mApp->statusBar()->showMessage( tr( "智能分割无法转换当前地图坐标。" ), 4500 );
+    notifyFailure( tr( "智能分割无法转换当前地图坐标，请检查影像坐标系。" ) );
+    return;
+  }
+  if ( std::any_of( rasterPoints.cbegin(), rasterPoints.cend(), [rasterLayer]( const QgsPointXY &point ) { return !rasterLayer->extent().contains( point ); } ) )
+  {
+    notifyFailure( tr( "提示点不在影像“%1”范围内。请删除越界点，或选中覆盖该位置的 TIF 后重新启动智能分割。" ).arg( rasterLayer->name() ) );
     return;
   }
 
@@ -6066,7 +6488,10 @@ void QgsEcoRestorationController::previewSmartSegmentationPrompt( const QVector<
   }
 
   if ( !hasCropExtent )
+  {
+    notifyFailure( tr( "无法建立智能分割范围，请检查影像坐标系与识别范围。" ) );
     return;
+  }
   if ( cropExtent.width() > 0 && cropExtent.height() > 0 )
   {
     const double paddingX = std::max( cropExtent.width() * 0.25, 1e-12 );
@@ -6076,8 +6501,7 @@ void QgsEcoRestorationController::previewSmartSegmentationPrompt( const QVector<
   cropExtent = cropExtent.intersect( rasterLayer->extent() );
   if ( cropExtent.isEmpty() )
   {
-    if ( mApp->statusBar() )
-      mApp->statusBar()->showMessage( tr( "智能分割范围不在影像覆盖范围内。" ), 4500 );
+    notifyFailure( tr( "智能分割范围不在影像覆盖范围内。" ) );
     return;
   }
 
@@ -6093,66 +6517,96 @@ void QgsEcoRestorationController::previewSmartSegmentationPrompt( const QVector<
 
   if ( mSmartSegmentationStatusLabel )
     mSmartSegmentationStatusLabel->setText( tr( "正在生成智能分割预览…" ) );
-  QApplication::setOverrideCursor( Qt::WaitCursor );
-  const QgsEcoSam2OnnxInference::Result inference = QgsEcoSam2OnnxInference::run( rasterLayer, parameters );
-  QApplication::restoreOverrideCursor();
-  if ( !inference.success )
+  mSmartSegmentationPreviewRunning = true;
+  const quint64 requestRevision = revision;
+  const QString rasterLayerId = rasterLayer->id();
+  const QgsCoordinateReferenceSystem canvasCrs = mApp->mapCanvas()->mapSettings().destinationCrs();
+  std::shared_ptr<QgsRasterLayer> inferenceRasterLayer( rasterLayer->clone() );
+  if ( !inferenceRasterLayer || !inferenceRasterLayer->isValid() )
   {
-    mSmartSegmentationPendingGeometry = QgsGeometry();
-    mSmartSegmentationPendingScore = 0.0;
-    mSmartSegmentationPendingPhaseId.clear();
-    mSmartSegmentationPendingRasterLayerId.clear();
-    if ( EcoSam2PromptMapTool *tool = mSmartSegmentationTool ? static_cast<EcoSam2PromptMapTool *>( mSmartSegmentationTool.data() ) : nullptr )
-      tool->clearPreviewGeometry();
-    hideSmartSegmentationClassificationPanel();
-    if ( mSmartSegmentationStatusLabel )
-      mSmartSegmentationStatusLabel->setText( tr( "未生成预览，请增加保留点或排除点后重试。" ) );
-    if ( mApp->statusBar() )
-      mApp->statusBar()->showMessage( tr( "智能分割未生成有效预览，请换点或增加排除点。" ), 5000 );
+    mSmartSegmentationPreviewRunning = false;
+    notifyFailure( tr( "无法创建影像副本，未能启动智能分割。" ) );
     return;
   }
+  auto *watcher = new QFutureWatcher<QgsEcoSam2OnnxInference::Result>( this );
+  connect( watcher, &QFutureWatcher<QgsEcoSam2OnnxInference::Result>::finished, this,
+    [this, watcher, requestRevision, rasterLayerId, outputCrs, canvasCrs] {
+      const QgsEcoSam2OnnxInference::Result inference = watcher->result();
+      watcher->deleteLater();
+      mSmartSegmentationPreviewRunning = false;
+      if ( requestRevision != mSmartSegmentationRequestRevision )
+      {
+        if ( mSmartSegmentationTool && mApp && mApp->mapCanvas()->mapTool() == mSmartSegmentationTool
+             && !mSmartSegmentationLatestPoints.isEmpty() )
+        {
+          const QVector<QgsPointXY> points = mSmartSegmentationLatestPoints;
+          const QVector<int> labels = mSmartSegmentationLatestLabels;
+          QTimer::singleShot( 0, this, [this, points, labels] { previewSmartSegmentationPrompt( points, labels ); } );
+        }
+        return;
+      }
+      if ( !inference.success )
+      {
+        if ( EcoSam2PromptMapTool *tool = mSmartSegmentationTool ? static_cast<EcoSam2PromptMapTool *>( mSmartSegmentationTool.data() ) : nullptr )
+          tool->clearPreviewGeometry();
+        hideSmartSegmentationClassificationPanel();
+        const QString message = inference.error.isEmpty() ? tr( "智能分割未生成有效预览，请换点或增加排除点。" ) : tr( "智能分割失败：%1" ).arg( inference.error );
+        if ( mSmartSegmentationStatusLabel )
+          mSmartSegmentationStatusLabel->setText( message );
+        if ( mApp && mApp->statusBar() )
+          mApp->statusBar()->showMessage( message, 6500 );
+        ecoImportTrace( QStringLiteral( "map SAM2 failed: %1" ).arg( inference.error ) );
+        return;
+      }
 
-  QgsGeometry resultGeometry = inference.geometry;
-  QgsGeometry canvasGeometry = inference.geometry;
-  try
-  {
-    if ( rasterLayer->crs() != outputCrs )
-    {
-      QgsCoordinateTransform transform( rasterLayer->crs(), outputCrs, QgsProject::instance()->transformContext() );
-      resultGeometry.transform( transform );
-    }
-    const QgsCoordinateReferenceSystem canvasCrs = mApp->mapCanvas()->mapSettings().destinationCrs();
-    if ( rasterLayer->crs() != canvasCrs )
-    {
-      QgsCoordinateTransform transform( rasterLayer->crs(), canvasCrs, QgsProject::instance()->transformContext() );
-      canvasGeometry.transform( transform );
-    }
-  }
-  catch ( const QgsCsException & )
-  {
-    if ( mApp->statusBar() )
-      mApp->statusBar()->showMessage( tr( "智能分割结果坐标转换失败。" ), 4500 );
-    return;
-  }
-  if ( resultGeometry.isNull() || resultGeometry.isEmpty() )
-    return;
+      QgsRasterLayer *rasterLayer = qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( rasterLayerId ) );
+      if ( !rasterLayer )
+        return;
 
-  mSmartSegmentationPendingGeometry = resultGeometry;
-  mSmartSegmentationPendingScore = inference.score;
-  mSmartSegmentationPendingPhaseId = layerPhaseIdForLayer( rasterLayer );
-  if ( mSmartSegmentationPendingPhaseId.isEmpty() )
-    mSmartSegmentationPendingPhaseId = currentPhaseId();
-  mSmartSegmentationPendingRasterLayerId = rasterLayer->id();
-  if ( EcoSam2PromptMapTool *tool = mSmartSegmentationTool ? static_cast<EcoSam2PromptMapTool *>( mSmartSegmentationTool.data() ) : nullptr )
-    tool->setPreviewGeometry( canvasGeometry );
-  if ( mSmartSegmentationStatusLabel )
-    mSmartSegmentationStatusLabel->setText( mSmartSegmentationStandalone
-                                              ? tr( "分割预览已更新，请选择问题类型后点击完成。" )
-                                              : tr( "分割预览已更新，可继续添加提示点或确认写入图斑。" ) );
-  if ( mSmartSegmentationStandalone )
-    showSmartSegmentationClassificationPanel();
-  if ( mApp->statusBar() )
-    mApp->statusBar()->showMessage( tr( "智能分割预览已更新。" ), 2500 );
+      QgsGeometry resultGeometry = inference.geometry;
+      QgsGeometry canvasGeometry = inference.geometry;
+      try
+      {
+        if ( rasterLayer->crs() != outputCrs )
+        {
+          QgsCoordinateTransform transform( rasterLayer->crs(), outputCrs, QgsProject::instance()->transformContext() );
+          resultGeometry.transform( transform );
+        }
+        if ( rasterLayer->crs() != canvasCrs )
+        {
+          QgsCoordinateTransform transform( rasterLayer->crs(), canvasCrs, QgsProject::instance()->transformContext() );
+          canvasGeometry.transform( transform );
+        }
+      }
+      catch ( const QgsCsException & )
+      {
+        if ( mApp && mApp->statusBar() )
+          mApp->statusBar()->showMessage( tr( "智能分割结果坐标转换失败。" ), 4500 );
+        return;
+      }
+      if ( resultGeometry.isNull() || resultGeometry.isEmpty() )
+        return;
+
+      mSmartSegmentationPendingGeometry = resultGeometry;
+      mSmartSegmentationPendingScore = inference.score;
+      mSmartSegmentationPendingPhaseId = layerPhaseIdForLayer( rasterLayer );
+      if ( mSmartSegmentationPendingPhaseId.isEmpty() )
+        mSmartSegmentationPendingPhaseId = currentPhaseId();
+      mSmartSegmentationPendingRasterLayerId = rasterLayer->id();
+      if ( EcoSam2PromptMapTool *tool = mSmartSegmentationTool ? static_cast<EcoSam2PromptMapTool *>( mSmartSegmentationTool.data() ) : nullptr )
+        tool->setPreviewGeometry( canvasGeometry );
+      if ( mSmartSegmentationStatusLabel )
+        mSmartSegmentationStatusLabel->setText( mSmartSegmentationStandalone
+                                                  ? tr( "分割预览已更新，请选择问题类型后点击完成。" )
+                                                  : tr( "分割预览已更新，可继续添加提示点或确认写入图斑。" ) );
+      if ( mSmartSegmentationStandalone )
+        showSmartSegmentationClassificationPanel();
+      if ( mApp && mApp->statusBar() )
+        mApp->statusBar()->showMessage( tr( "智能分割预览已更新。" ), 2500 );
+    } );
+  watcher->setFuture( QtConcurrent::run( [inferenceRasterLayer, parameters] {
+    return QgsEcoSam2OnnxInference::run( inferenceRasterLayer.get(), parameters );
+  } ) );
 }
 
 void QgsEcoRestorationController::commitSmartSegmentationPreview()
@@ -6451,6 +6905,13 @@ void QgsEcoRestorationController::leaveSmartSegmentationTool()
   mSmartSegmentationFeatureId = -1;
   mSmartSegmentationStandalone = true;
   mSmartSegmentationOutputCrs = QgsCoordinateReferenceSystem();
+  mSmartSegmentationSessionRasterLayerId.clear();
+  mSmartSegmentationSessionPhaseId.clear();
+  mSmartSegmentationRasterPinned = false;
+  ++mSmartSegmentationRequestRevision;
+  mSmartSegmentationPreviewRunning = false;
+  mSmartSegmentationLatestPoints.clear();
+  mSmartSegmentationLatestLabels.clear();
 }
 
 void QgsEcoRestorationController::cancelExtentRecognition()
@@ -6474,12 +6935,12 @@ void QgsEcoRestorationController::cancelExtentRecognition()
     mRecognitionSelectionLabel->setText( tr( "已退出框选模式，可以继续平移、缩放地图。" ) );
 }
 
-void QgsEcoRestorationController::runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId )
+void QgsEcoRestorationController::runRecognition( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId, const QString &rasterLayerId, const QStringList &towerFeatureIds )
 {
-  runRecognitionAsync( targetExtents, targetLabels, towerLayerId );
+  runRecognitionAsync( targetExtents, targetLabels, towerLayerId, rasterLayerId, towerFeatureIds );
 }
 
-void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId )
+void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangle> &targetExtents, const QStringList &targetLabels, const QString &towerLayerId, const QString &pinnedRasterLayerId, const QStringList &towerFeatureIds )
 {
   const QString title = QStringLiteral( "\u5854\u57FA\u6270\u52A8\u8BC6\u522B" );
   if ( mRecognitionRunning )
@@ -6488,7 +6949,9 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
     return;
   }
 
-  QgsRasterLayer *rasterLayer = selectedRecognitionRasterLayer();
+  QgsRasterLayer *rasterLayer = pinnedRasterLayerId.isEmpty()
+                                ? selectedRecognitionRasterLayer()
+                                : qobject_cast<QgsRasterLayer *>( QgsProject::instance()->mapLayer( pinnedRasterLayerId ) );
   QgsVectorLayer *towerLayer = selectedRecognitionTowerLayer();
   if ( !rasterLayer || !rasterLayer->isValid() || !rasterLayer->dataProvider() )
   {
@@ -6510,6 +6973,7 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
 
   QVector<QgsRectangle> validExtents;
   QStringList validLabels;
+  QStringList validTowerFeatureIds;
   const QgsRectangle rasterExtent = rasterLayer->extent();
   for ( int index = 0; index < targetExtents.size(); ++index )
   {
@@ -6518,10 +6982,12 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
       continue;
     validExtents.append( extent );
     validLabels.append( index < targetLabels.size() ? targetLabels.at( index ) : QString() );
+    validTowerFeatureIds.append( towerFeatureIds.value( index ) );
   }
   if ( validExtents.isEmpty() )
   {
-    showMessage( title, QStringLiteral( "\u6746\u5854\u8303\u56F4\u4E0E\u5F53\u524D\u5F71\u50CF\u6CA1\u6709\u4EA4\u96C6\uFF0C\u8BF7\u68C0\u67E5 CRS \u548C\u671F\u6B21\u3002" ), true );
+    showMessage( title, tr( "%1与影像“%2”没有交集。请检查该影像的覆盖范围、坐标系和所属期次。" )
+                         .arg( towerLayerId.isEmpty() ? tr( "框选范围" ) : tr( "杆塔范围" ), rasterLayer->name() ), true );
     return;
   }
 
@@ -6533,6 +6999,8 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
     return;
   resultLayer->setCustomProperty( QStringLiteral( "eco/category" ), QStringLiteral( "recognition-result" ) );
   resultLayer->setCustomProperty( QStringLiteral( "eco/resultType" ), QStringLiteral( "construction-disturbance" ) );
+  resultLayer->setCustomProperty( QStringLiteral( "eco/sourceImageLayerId" ), rasterLayer->id() );
+  resultLayer->setCustomProperty( QStringLiteral( "eco/sourceImageName" ), rasterLayer->name() );
   if ( !recognitionPhaseId.isEmpty() )
     resultLayer->setCustomProperty( sPhaseIdProperty, recognitionPhaseId );
   ensureRecognitionVisibilityField( resultLayer );
@@ -6547,6 +7015,7 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
   parameters.confidence = mConfidenceSpin ? mConfidenceSpin->value() : 0.35;
   parameters.overlapPercent = 20;
   parameters.maximumTiles = 5000;
+  parameters.preserveTargetIdentity = !towerLayerId.isEmpty();
   parameters.targetExtents = validExtents;
   parameters.targetLabels = validLabels;
 
@@ -6609,7 +7078,7 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
   auto *watcher = new QFutureWatcher<QgsEcoOnnxInference::Result>( this );
   const QString resultLayerId = resultLayer->id();
   const QString rasterLayerId = rasterLayer->id();
-  connect( watcher, &QFutureWatcher<QgsEcoOnnxInference::Result>::finished, this, [this, watcher, controller, progressBand, resultLayerId, rasterLayerId, validExtents, validLabels, towerLayerId, title] {
+  connect( watcher, &QFutureWatcher<QgsEcoOnnxInference::Result>::finished, this, [this, watcher, controller, progressBand, resultLayerId, rasterLayerId, validExtents, validLabels, validTowerFeatureIds, towerLayerId, title] {
     const QgsEcoOnnxInference::Result inference = watcher->result();
     watcher->deleteLater();
     auto cleanup = [this, progressBand]( bool success ) {
@@ -6660,9 +7129,12 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
       const int visibilityIndex = ensureRecognitionVisibilityField( resultLayer );
       const int towerNoIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerNumberField ) );
       const int statusIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionStatusField ) );
+      const int towerLayerIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerLayerField ) );
+      const int towerFeatureIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerFeatureField ) );
       qlonglong nextObjectId = objectIdIndex >= 0 ? resultLayer->maximumValue( objectIdIndex ).toLongLong() + 1 : 1;
-      for ( const QString &label : validLabels )
+      for ( int targetIndex = 0; targetIndex < validLabels.size(); ++targetIndex )
       {
+        const QString label = validLabels.at( targetIndex );
         QgsFeature feature( resultLayer->fields() );
         if ( objectIdIndex >= 0 ) feature.setAttribute( objectIdIndex, nextObjectId++ );
         if ( sourceIndex >= 0 ) feature.setAttribute( sourceIndex, towerLayerId.isEmpty() ? QStringLiteral( "\u624B\u52A8\u6846\u9009\u8BC6\u522B" ) : QStringLiteral( "\u81EA\u52A8\u6574\u7EBF\u8BC6\u522B" ) );
@@ -6670,6 +7142,8 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
         if ( visibilityIndex >= 0 ) feature.setAttribute( visibilityIndex, 1 );
         if ( towerNoIndex >= 0 ) feature.setAttribute( towerNoIndex, towerLayerId.isEmpty() ? QString() : label );
         if ( statusIndex >= 0 ) feature.setAttribute( statusIndex, QStringLiteral( "\u65E0\u8BC6\u522B\u7ED3\u679C" ) );
+        if ( towerLayerIndex >= 0 ) feature.setAttribute( towerLayerIndex, towerLayerId );
+        if ( towerFeatureIndex >= 0 ) feature.setAttribute( towerFeatureIndex, validTowerFeatureIds.value( targetIndex ) );
         resultLayer->addFeature( feature );
       }
       if ( !resultLayer->commitChanges() )
@@ -6701,10 +7175,14 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
     const int visibilityIndex = ensureRecognitionVisibilityField( resultLayer );
     const int towerNoIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerNumberField ) );
     const int statusIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionStatusField ) );
+    const int towerLayerIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerLayerField ) );
+    const int towerFeatureIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerFeatureField ) );
     qlonglong nextObjectId = objectIdIndex >= 0 ? resultLayer->maximumValue( objectIdIndex ).toLongLong() + 1 : 1;
     QgsCoordinateTransform transform( rasterLayer->crs(), resultLayer->crs(), QgsProject::instance()->transformContext() );
     int addedCount = 0;
-    QSet<QString> detectedLabels;
+    // Labels may be blank or duplicated. Keep the inference target index as
+    // the identity so an unnamed tower never inherits another tower's result.
+    QSet<int> detectedTargetIndexes;
     for ( const QgsEcoOnnxDetection &detection : inference.detections )
     {
       QgsGeometry geometry = detection.geometry;
@@ -6726,21 +7204,27 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
       if ( confidenceIndex >= 0 ) feature.setAttribute( confidenceIndex, detection.confidence );
       if ( verifyIndex >= 0 ) feature.setAttribute( verifyIndex, QStringLiteral( "\u5F85\u6838\u67E5" ) );
       if ( sourceIndex >= 0 ) feature.setAttribute( sourceIndex, towerLayerId.isEmpty() ? QStringLiteral( "\u624B\u52A8\u6846\u9009\u8BC6\u522B" ) : QStringLiteral( "\u81EA\u52A8\u6574\u7EBF\u8BC6\u522B" ) );
-      const QString resultLabel = detection.sourceName.isEmpty() ? QStringLiteral( "\u8BC6\u522B\u8303\u56F4 %1" ).arg( detection.tileIndex ) : detection.sourceName;
+      const int targetIndex = detection.tileIndex - 1;
+      const QString resultLabel = towerLayerId.isEmpty()
+                                  ? ( detection.sourceName.isEmpty() ? QStringLiteral( "\u8BC6\u522B\u8303\u56F4 %1" ).arg( detection.tileIndex ) : detection.sourceName )
+                                  : validLabels.value( targetIndex );
       if ( remarkIndex >= 0 ) feature.setAttribute( remarkIndex, resultLabel );
       if ( visibilityIndex >= 0 ) feature.setAttribute( visibilityIndex, 1 );
       if ( towerNoIndex >= 0 ) feature.setAttribute( towerNoIndex, towerLayerId.isEmpty() ? QString() : resultLabel );
       if ( statusIndex >= 0 ) feature.setAttribute( statusIndex, QStringLiteral( "\u6709\u8BC6\u522B\u7ED3\u679C" ) );
+      if ( towerLayerIndex >= 0 ) feature.setAttribute( towerLayerIndex, towerLayerId );
+      if ( towerFeatureIndex >= 0 ) feature.setAttribute( towerFeatureIndex, validTowerFeatureIds.value( targetIndex ) );
       if ( resultLayer->addFeature( feature ) )
       {
         ++addedCount;
-        detectedLabels.insert( resultLabel );
+        detectedTargetIndexes.insert( targetIndex );
       }
     }
-    for ( const QString &label : validLabels )
+    for ( int targetIndex = 0; targetIndex < validLabels.size(); ++targetIndex )
     {
-      if ( detectedLabels.contains( label ) )
+      if ( detectedTargetIndexes.contains( targetIndex ) )
         continue;
+      const QString label = validLabels.at( targetIndex );
       QgsFeature feature( resultLayer->fields() );
       if ( objectIdIndex >= 0 ) feature.setAttribute( objectIdIndex, nextObjectId++ );
       if ( sourceIndex >= 0 ) feature.setAttribute( sourceIndex, towerLayerId.isEmpty() ? QStringLiteral( "\u624B\u52A8\u6846\u9009\u8BC6\u522B" ) : QStringLiteral( "\u81EA\u52A8\u6574\u7EBF\u8BC6\u522B" ) );
@@ -6748,6 +7232,8 @@ void QgsEcoRestorationController::runRecognitionAsync( const QVector<QgsRectangl
       if ( visibilityIndex >= 0 ) feature.setAttribute( visibilityIndex, 1 );
       if ( towerNoIndex >= 0 ) feature.setAttribute( towerNoIndex, towerLayerId.isEmpty() ? QString() : label );
       if ( statusIndex >= 0 ) feature.setAttribute( statusIndex, QStringLiteral( "\u65E0\u8BC6\u522B\u7ED3\u679C" ) );
+      if ( towerLayerIndex >= 0 ) feature.setAttribute( towerLayerIndex, towerLayerId );
+      if ( towerFeatureIndex >= 0 ) feature.setAttribute( towerFeatureIndex, validTowerFeatureIds.value( targetIndex ) );
       resultLayer->addFeature( feature );
     }
     if ( !resultLayer->commitChanges() )
@@ -7339,6 +7825,8 @@ QgsVectorLayer *QgsEcoRestorationController::createResultLayer( bool restoration
   fields.append( QgsField( restoration ? QStringLiteral( "check_date" ) : QStringLiteral( "image_date" ), QMetaType::Type::QDate ) );
   fields.append( QgsField( QStringLiteral( "remark" ), QMetaType::Type::QString, QString(), 120 ) );
   fields.append( QgsField( QLatin1String( sRecognitionTowerNumberField ), QMetaType::Type::QString, QString(), 40 ) );
+  fields.append( QgsField( QLatin1String( sRecognitionTowerLayerField ), QMetaType::Type::QString, QString(), 120 ) );
+  fields.append( QgsField( QLatin1String( sRecognitionTowerFeatureField ), QMetaType::Type::QString, QString(), 40 ) );
   if ( !restoration )
   {
     fields.append( QgsField( QLatin1String( sRecognitionVisibilityField ), QMetaType::Type::Int ) );
@@ -8346,6 +8834,32 @@ bool QgsEcoRestorationController::eventFilter( QObject *watched, QEvent *event )
     }
   }
   QgsLayerTreeView *layerTreeView = mApp ? mApp->layerTreeView() : nullptr;
+  if ( layerTreeView && watched == layerTreeView && event->type() == QEvent::KeyPress )
+  {
+    const auto *keyEvent = static_cast<QKeyEvent *>( event );
+    if ( keyEvent->key() == Qt::Key_Space )
+    {
+      const QList<QgsLayerTreeNode *> selectedNodes = layerTreeView->selectedNodes();
+      const bool containsGroup = std::any_of( selectedNodes.cbegin(), selectedNodes.cend(), []( QgsLayerTreeNode *node ) {
+        return qobject_cast<QgsLayerTreeGroup *>( node );
+      } );
+      if ( containsGroup )
+      {
+        // Match QGIS's multi-selection Space behavior, with the same subtree
+        // cascade used for a business group checkbox click.
+        const bool checked = !selectedNodes.constFirst()->itemVisibilityChecked();
+        for ( QgsLayerTreeNode *node : selectedNodes )
+        {
+          if ( QgsLayerTreeGroup *group = qobject_cast<QgsLayerTreeGroup *>( node ) )
+            group->setItemVisibilityCheckedRecursive( checked );
+          else
+            node->setItemVisibilityChecked( checked );
+        }
+        event->accept();
+        return true;
+      }
+    }
+  }
   if ( layerTreeView && ( watched == layerTreeView || watched == layerTreeView->viewport() )
        && event->type() == QEvent::ContextMenu )
   {
@@ -8393,32 +8907,12 @@ bool QgsEcoRestorationController::eventFilter( QObject *watched, QEvent *event )
         const auto *delegate = dynamic_cast<const EcoLayerTreeItemDelegate *>( layerTreeView->itemDelegateForIndex( index ) );
         if ( delegate && delegate->checkIndicatorRect( index ).contains( viewPoint ) )
         {
-          // QgsLayerTreeView temporarily clears ActionHierarchical while it
-          // handles a normal mouse release. Apply the checkbox change here so
-          // a parent group's visibility always propagates to its children.
-          if ( QgsLayerTreeModel *model = layerTreeView->layerTreeModel() )
-          {
-            // indexAt() returns a proxy-model index. Convert it back to the
-            // source layer-tree model before calling setData().
-            const QModelIndex sourceIndex = layerTreeView->node2sourceIndex( groupNode );
-            const QgsLayerTreeModel::Flags oldFlags = model->flags();
-            model->setFlag( QgsLayerTreeModel::ActionHierarchical, true );
-            if ( sourceIndex.isValid() )
-            {
-              model->setData( sourceIndex,
-                              groupNode->itemVisibilityChecked() ? Qt::Unchecked : Qt::Checked,
-                              Qt::CheckStateRole );
-            }
-            else
-            {
-              groupNode->setItemVisibilityCheckedRecursive( !groupNode->itemVisibilityChecked() );
-            }
-            model->setFlags( oldFlags );
-          }
-          else
-          {
-            groupNode->setItemVisibilityCheckedRecursive( !groupNode->itemVisibilityChecked() );
-          }
+          // Change only the explicitly clicked group's subtree. The generic
+          // model treats an empty group like a leaf and checks its ancestors,
+          // which can unexpectedly reveal imagery in a sibling group.
+          // QGIS's recursive group operation preserves mutually exclusive
+          // children and emits the visibility signals used by both canvases.
+          groupNode->setItemVisibilityCheckedRecursive( !groupNode->itemVisibilityChecked() );
           layerTreeView->viewport()->update();
           event->accept();
           return true;
@@ -8915,7 +9409,6 @@ QgsLayerTreeGroup *QgsEcoRestorationController::commonDataGroup( bool create ) c
   group->setCustomProperty( sGroupTypeProperty, sCommonGroup );
   group->setCustomProperty( sTreeIconProperty, QStringLiteral( "common" ) );
   group->setExpanded( true );
-  group->setItemVisibilityChecked( true );
 
   if ( create )
   {
@@ -8930,22 +9423,10 @@ QgsLayerTreeGroup *QgsEcoRestorationController::commonDataGroup( bool create ) c
       lineGroup->setCustomProperty( sGroupTypeProperty, QStringLiteral( "line-data" ) );
       lineGroup->setCustomProperty( sTreeIconProperty, QStringLiteral( "line" ) );
       lineGroup->setExpanded( true );
-      lineGroup->setItemVisibilityChecked( true );
     }
 
-    QgsLayerTreeGroup *scopeGroup = directChildGroupByProperty( group, sGroupTypeProperty, QStringLiteral( "scope-data" ) );
-    if ( !scopeGroup )
-      scopeGroup = directChildGroup( group, sScopeGroup );
-    if ( !scopeGroup )
-      scopeGroup = group->insertGroup( lineGroup ? 1 : 0, sScopeGroup );
-    if ( scopeGroup )
-    {
-      scopeGroup->setName( sScopeGroup );
-      scopeGroup->setCustomProperty( sGroupTypeProperty, QStringLiteral( "scope-data" ) );
-      scopeGroup->setCustomProperty( sTreeIconProperty, QStringLiteral( "scope" ) );
-      scopeGroup->setExpanded( true );
-      scopeGroup->setItemVisibilityChecked( true );
-    }
+    promoteLegacyBusinessGroupChildren( group, QStringLiteral( "scope-data" ),
+                                        { sLegacyScopeGroup, QStringLiteral( "03 调查范围" ), QStringLiteral( "02 调直范围" ) } );
   }
   return group;
 }
@@ -8980,17 +9461,11 @@ QgsLayerTreeGroup *QgsEcoRestorationController::phaseGroup( const QString &phase
   {
     if ( !directChildGroup( group, sPhaseResultsGroup ) )
       group->insertGroup( 0, sPhaseResultsGroup );
-    if ( !directChildGroup( group, sPhaseScreenshotsGroup ) )
-      group->insertGroup( std::min( 1, static_cast<int>( group->children().size() ) ), sPhaseScreenshotsGroup );
     if ( !directChildGroup( group, sImageryGroup ) )
-      group->insertGroup( std::min( 2, static_cast<int>( group->children().size() ) ), sImageryGroup );
+      group->insertGroup( std::min( 1, static_cast<int>( group->children().size() ) ), sImageryGroup );
+    promoteLegacyBusinessGroupChildren( group, QStringLiteral( "phase-screenshots" ), { sLegacyPhaseScreenshotsGroup } );
     if ( !mLayerImportInProgress )
       ensurePhaseChildGroupOrder( group );
-    if ( QgsLayerTreeGroup *screenshots = directChildGroup( group, sPhaseScreenshotsGroup ) )
-    {
-      screenshots->setCustomProperty( sGroupTypeProperty, QStringLiteral( "phase-screenshots" ) );
-      screenshots->setCustomProperty( sTreeIconProperty, QStringLiteral( "screenshots" ) );
-    }
     if ( QgsLayerTreeGroup *imagery = directChildGroup( group, sImageryGroup ) )
     {
       imagery->setCustomProperty( sGroupTypeProperty, QStringLiteral( "phase-imagery" ) );
@@ -9047,6 +9522,11 @@ QgsLayerTreeGroup *QgsEcoRestorationController::phaseSubGroup( const QString &ph
   QgsLayerTreeGroup *phase = phaseGroup( phaseId, create );
   if ( !phase )
     return nullptr;
+  // Saved projects and older callers can still refer to screenshot storage.
+  // The standalone bucket is retired; preserve their phase ownership without
+  // re-creating the removed node.
+  if ( groupName == sLegacyPhaseScreenshotsGroup )
+    return phase;
   QgsLayerTreeGroup *group = directChildGroup( phase, groupName );
   if ( !group && create )
     group = phase->addGroup( groupName );
@@ -9055,8 +9535,6 @@ QgsLayerTreeGroup *QgsEcoRestorationController::phaseSubGroup( const QString &ph
     group->setCustomProperty( sPhaseIdProperty, phaseId );
     if ( groupName == sImageryGroup )
       group->setCustomProperty( sTreeIconProperty, QStringLiteral( "imagery" ) );
-    else if ( groupName == sPhaseScreenshotsGroup )
-      group->setCustomProperty( sTreeIconProperty, QStringLiteral( "screenshots" ) );
     else if ( groupName == sPhaseResultsGroup )
       group->setCustomProperty( sTreeIconProperty, QStringLiteral( "results" ) );
   }
@@ -10246,6 +10724,47 @@ QgsLayerTreeGroup *QgsEcoRestorationController::targetBusinessGroupForLayer( Qgs
     if ( !phaseId.isEmpty() )
       layer->setCustomProperty( sPhaseIdProperty, phaseId );
   };
+  QgsLayerTreeLayer *archiveNode = QgsProject::instance()->layerTreeRoot()->findLayer( layer->id() );
+  bool screenshotArchive = layer->customProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), false ).toBool()
+                           || ( archiveNode && archiveNode->customProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), false ).toBool() );
+  for ( QgsLayerTreeNode *ancestor = archiveNode ? archiveNode->parent() : nullptr; ancestor; ancestor = ancestor->parent() )
+  {
+    if ( ancestor->customProperty( sGroupTypeProperty ).toString() == QLatin1String( "phase-screenshots" )
+         || ( qobject_cast<QgsLayerTreeGroup *>( ancestor ) && QgsLayerTree::toGroup( ancestor )->name() == sLegacyPhaseScreenshotsGroup ) )
+      screenshotArchive = true;
+    if ( ancestor->customProperty( sGroupTypeProperty ).toString() == QLatin1String( "phase" ) )
+    {
+      if ( screenshotArchive )
+        phaseId = ancestor->customProperty( sPhaseIdProperty ).toString().trimmed();
+      break;
+    }
+  }
+  if ( screenshotArchive )
+  {
+    // Retired screenshot buckets can contain raster/vector footprint layers
+    // and custom nested folders. Preserve their archival phase and folder
+    // when the layers-added handler reclassifies the whole project.
+    layer->setCustomProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), true );
+    setLayerPhase();
+    QgsLayerTreeGroup *archivePhase = phaseGroup( phaseId, true );
+    // phaseGroup may promote/reorder legacy tree nodes; reacquire the node
+    // after normalization instead of keeping its pre-migration pointer.
+    QgsLayerTreeLayer *node = QgsProject::instance()->layerTreeRoot()->findLayer( layer->id() );
+    if ( node )
+    {
+      for ( QgsLayerTreeNode *ancestor = node->parent(); ancestor; ancestor = ancestor->parent() )
+      {
+        if ( ancestor->customProperty( sGroupTypeProperty ).toString() == QLatin1String( "phase" ) )
+        {
+          phaseId = ancestor->customProperty( sPhaseIdProperty ).toString().trimmed();
+          setLayerPhase();
+          return qobject_cast<QgsLayerTreeGroup *>( node->parent() );
+        }
+      }
+    }
+    setLayerPhase();
+    return archivePhase;
+  }
   if ( !explicitResultGroup.isEmpty() )
   {
     setLayerPhase();
@@ -10304,10 +10823,7 @@ QgsLayerTreeGroup *QgsEcoRestorationController::targetBusinessGroupForLayer( Qgs
         return directChildGroup( common, sLineGroup );
     }
     if ( vectorLayer->geometryType() == Qgis::GeometryType::Polygon )
-    {
-      if ( QgsLayerTreeGroup *common = commonDataGroup( true ) )
-        return directChildGroup( common, sScopeGroup );
-    }
+      return commonDataGroup( true );
   }
   return commonDataGroup( true );
 }
@@ -10582,11 +11098,18 @@ void QgsEcoRestorationController::organizeProjectTree()
         removeGroupIfEmpty( old );
       }
     }
-    if ( QgsLayerTreeGroup *target = directChildGroup( common, sScopeGroup ) )
+    for ( const QString &legacyScopeName : { oldScopeGroup, sLegacyScopeGroup, QStringLiteral( "02 调直范围" ) } )
     {
-      if ( QgsLayerTreeGroup *old = directChildGroup( projectGroup, oldScopeGroup ) )
+      if ( QgsLayerTreeGroup *old = directChildGroup( projectGroup, legacyScopeName ) )
       {
-        moveChildrenTo( old, target );
+        const bool legacyChecked = old->itemVisibilityChecked();
+        const QList<QgsLayerTreeNode *> oldChildren = old->children();
+        for ( QgsLayerTreeNode *child : oldChildren )
+        {
+          if ( !legacyChecked )
+            child->setItemVisibilityChecked( false );
+          appendNodeToGroupSafely( old, child, common );
+        }
         removeGroupIfEmpty( old );
       }
     }
@@ -10594,6 +11117,37 @@ void QgsEcoRestorationController::organizeProjectTree()
 
   if ( !phaseId.isEmpty() )
   {
+    QgsLayerTreeGroup *legacyScreenshots = directChildGroupByProperty( projectGroup, sGroupTypeProperty, QStringLiteral( "phase-screenshots" ) );
+    if ( !legacyScreenshots )
+      legacyScreenshots = directChildGroup( projectGroup, sLegacyPhaseScreenshotsGroup );
+    if ( legacyScreenshots )
+    {
+      QString screenshotsPhaseId = legacyScreenshots->customProperty( sPhaseIdProperty ).toString().trimmed();
+      if ( !phaseIds().contains( screenshotsPhaseId ) )
+        screenshotsPhaseId = phaseId;
+      if ( QgsLayerTreeGroup *target = phaseGroup( screenshotsPhaseId, true ) )
+      {
+        for ( QgsLayerTreeLayer *layerNode : legacyScreenshots->findLayers() )
+        {
+          layerNode->setCustomProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), true );
+          if ( QgsMapLayer *layer = layerNode->layer() )
+          {
+            layer->setCustomProperty( QStringLiteral( "eco/legacyScreenshotArchive" ), true );
+            layer->setCustomProperty( sPhaseIdProperty, screenshotsPhaseId );
+          }
+        }
+        const bool legacyChecked = legacyScreenshots->itemVisibilityChecked();
+        for ( QgsLayerTreeNode *child : legacyScreenshots->children() )
+        {
+          if ( QgsLayerTreeLayer *layerNode = qobject_cast<QgsLayerTreeLayer *>( child ); layerNode && layerNode->layer() )
+            layerNode->layer()->setCustomProperty( sPhaseIdProperty, screenshotsPhaseId );
+          if ( !legacyChecked )
+            child->setItemVisibilityChecked( false );
+          appendNodeToGroupSafely( legacyScreenshots, child, target );
+        }
+      }
+      removeGroupIfEmpty( legacyScreenshots );
+    }
     if ( QgsLayerTreeGroup *old = directChildGroup( projectGroup, oldImageryGroup ) )
     {
       moveChildrenTo( old, phaseSubGroup( phaseId, sImageryGroup ) );
@@ -10672,21 +11226,14 @@ void QgsEcoRestorationController::moveLayerToBusinessGroup( QgsMapLayer *layer, 
   if ( destinationNode )
   {
     destinationNode->setExpanded( false );
-    destinationNode->setItemVisibilityChecked( true );
+    // Organizing an existing layer is not a visibility change. Imports and
+    // newly produced results explicitly enable their own nodes elsewhere.
     for ( QgsLayerTreeLayer *candidate : root->findLayers() )
     {
       if ( candidate && candidate != destinationNode && candidate->layerId() == layer->id() && candidate->parent() )
       {
         if ( QgsLayerTreeGroup *parentGroup = QgsLayerTree::toGroup( candidate->parent() ) )
           parentGroup->removeChildNode( candidate );
-      }
-    }
-    for ( QgsLayerTreeNode *ancestor = group->parent(); ancestor; ancestor = ancestor->parent() )
-    {
-      if ( QgsLayerTreeGroup *ancestorGroup = QgsLayerTree::toGroup( ancestor ) )
-      {
-        ancestorGroup->setExpanded( true );
-        ancestorGroup->setItemVisibilityChecked( true );
       }
     }
     return;
@@ -10725,7 +11272,7 @@ void QgsEcoRestorationController::moveLayerToBusinessGroup( QgsMapLayer *layer, 
 QString QgsEcoRestorationController::businessGroupForLayer( QgsMapLayer *layer ) const
 {
   if ( !layer )
-    return sScopeGroup;
+    return sCommonGroup;
   const QString category = layer->customProperty( QStringLiteral( "eco/category" ) ).toString();
   const QString resultType = layer->customProperty( QStringLiteral( "eco/resultType" ) ).toString();
   if ( category == QLatin1String( "slope-result" )
@@ -10755,9 +11302,9 @@ QString QgsEcoRestorationController::businessGroupForLayer( QgsMapLayer *layer )
     if ( vectorLayer->geometryType() == Qgis::GeometryType::Point || vectorLayer->geometryType() == Qgis::GeometryType::Line )
       return sLineGroup;
     if ( vectorLayer->geometryType() == Qgis::GeometryType::Polygon )
-      return sScopeGroup;
+      return sCommonGroup;
   }
-  return sScopeGroup;
+  return sCommonGroup;
 }
 
 void QgsEcoRestorationController::scheduleProjectStateRefresh()
@@ -10977,6 +11524,10 @@ void QgsEcoRestorationController::refreshRecognitionRasterOrder()
   if ( !selectedRaster || !selectedRaster->isSpatial() )
     return;
 
+  const QgsLayerTreeLayer *selectedNode = QgsProject::instance()->layerTreeRoot()->findLayer( selectedRaster->id() );
+  if ( !selectedNode || !selectedNode->isVisible() )
+    return;
+
   QgsMapCanvas *canvas = mApp->mapCanvas();
   if ( !canvas )
     return;
@@ -10986,7 +11537,7 @@ void QgsEcoRestorationController::refreshRecognitionRasterOrder()
   // The combo-box is a view selection, not a request to rebuild the project.
   QList<QgsMapLayer *> currentLayers = canvas->layers();
   if ( !currentLayers.contains( selectedRaster ) )
-    currentLayers << selectedRaster;
+    return;
 
   QList<QgsMapLayer *> contextualLayers;
   QList<QgsMapLayer *> rasterLayers;
@@ -11072,6 +11623,8 @@ void QgsEcoRestorationController::syncBusinessProjectView( const QList<QgsMapLay
     {
       if ( !layer || !layer->isSpatial() || canvasLayers.contains( layer ) )
         continue;
+      if ( QgsLayerTreeLayer *node = projectRoot->findLayer( layer->id() ); node && !node->isVisible() )
+        continue;
       canvasLayers << layer;
     }
     promoteSelectedRecognitionRaster( canvasLayers );
@@ -11092,13 +11645,8 @@ void QgsEcoRestorationController::syncBusinessProjectView( const QList<QgsMapLay
     ensureBusinessGroups();
 
   projectRoot->setItemVisibilityChecked( true );
-  if ( QgsLayerTreeGroup *common = commonDataGroup( false ) )
-    common->setItemVisibilityChecked( true );
-  for ( const QString &id : phaseIds() )
-  {
-    if ( QgsLayerTreeGroup *group = phaseGroup( id, false ) )
-      group->setItemVisibilityChecked( true );
-  }
+  // Keep user checkbox states when syncing or reopening the project. Only an
+  // explicit import/result attachment should enable its required ancestors.
   if ( projectTree && projectTree->hasCustomLayerOrder() )
     projectTree->setHasCustomLayerOrder( false );
 
@@ -11150,6 +11698,8 @@ void QgsEcoRestorationController::syncBusinessProjectView( const QList<QgsMapLay
   for ( QgsMapLayer *layer : extraLayers )
   {
     if ( !layer || !layer->isSpatial() || canvasLayers.contains( layer ) )
+      continue;
+    if ( QgsLayerTreeLayer *node = projectRoot->findLayer( layer->id() ); node && !node->isVisible() )
       continue;
     canvasLayers << layer;
   }
@@ -11486,7 +12036,45 @@ void QgsEcoRestorationController::showRecognitionResultTable( const QString &res
     } );
 
     connect( mRecognitionResultFilter, QOverload<int>::of( &QComboBox::currentIndexChanged ), this, [this] { refreshRecognitionResultTable(); } );
+    const auto towerChoices = [this] {
+      QList<EcoTowerChoice> choices;
+      QgsVectorLayer *resultLayer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mRecognitionResultLayerId ) );
+      QgsVectorLayer *towerLayer = recognitionResultTowerLayer( resultLayer );
+      if ( !resultLayer || !towerLayer )
+        return choices;
+      QSet<QString> used;
+      const int resultTowerIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerNumberField ) );
+      QgsFeature resultFeature;
+      QgsFeatureIterator resultIt = resultLayer->getFeatures();
+      while ( resultIt.nextFeature( resultFeature ) )
+      {
+        const QString value = resultTowerIndex >= 0 ? resultFeature.attribute( resultTowerIndex ).toString().trimmed() : QString();
+        if ( !value.isEmpty() )
+          used.insert( value );
+      }
+      const int towerFieldIndex = strictRecognitionTowerField( towerLayer->fields() );
+      if ( towerFieldIndex < 0 )
+        return choices;
+      QgsFeature towerFeature;
+      QgsFeatureIterator towerIt = towerLayer->getFeatures();
+      while ( towerIt.nextFeature( towerFeature ) )
+      {
+        const QString number = towerFeature.attribute( towerFieldIndex ).toString().trimmed();
+        if ( number.isEmpty() || used.contains( number ) )
+          continue;
+        choices.append( EcoTowerChoice { number, towerLayer->id(), QString::number( towerFeature.id() ) } );
+      }
+      return choices;
+    };
+    const auto saveTowerBinding = [this]( const QString &layerId, qint64 featureId, const QString &number, const QString &towerLayerId, const QString &towerFeatureId ) {
+      saveRecognitionResultTowerBinding( layerId, featureId, number, towerLayerId, towerFeatureId );
+    };
+    auto *towerDelegate = new EcoRecognitionTowerDelegate( towerChoices, saveTowerBinding, mRecognitionResultTable );
+    mRecognitionResultTable->setItemDelegateForColumn( 1, towerDelegate );
+    mRecognitionResultTable->setItemDelegateForColumn( 8, towerDelegate );
     connect( mRecognitionResultTable, &QTableWidget::itemChanged, this, [this]( QTableWidgetItem *item ) {
+      if ( item && item->data( Qt::UserRole + 6 ).toBool() )
+        return;
       if ( !item || ( item->column() != 1 && item->column() != 8 ) || mRecognitionResultLayerId.isEmpty() )
         return;
       QgsVectorLayer *layer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mRecognitionResultLayerId ) );
@@ -11500,22 +12088,9 @@ void QgsEcoRestorationController::showRecognitionResultTable( const QString &res
       const int fieldIndex = layer->fields().indexFromName( QLatin1String( sRecognitionTowerNumberField ) );
       if ( fieldIndex < 0 )
         return;
-      const bool startedHere = !layer->isEditable();
-      if ( startedHere && !layer->startEditing() )
-        return;
-      if ( !layer->changeAttributeValue( featureId, fieldIndex, item->text().trimmed() ) )
-      {
-        if ( startedHere )
-          layer->rollBack();
-        return;
-      }
-      if ( startedHere && !layer->commitChanges() )
-      {
-        layer->rollBack();
-        return;
-      }
-      layer->triggerRepaint();
-      QgsProject::instance()->setDirty( true );
+      saveRecognitionResultTowerBinding( layer->id(), featureId, item->text().trimmed(),
+                                        item->data( Qt::UserRole + 3 ).toString(),
+                                        item->data( Qt::UserRole + 4 ).toString() );
     } );
     connect( mRecognitionResultTable, &QWidget::customContextMenuRequested, this, [this]( const QPoint &pos ) { showRecognitionResultContextMenu( pos ); } );
     if ( QTableWidgetItem *visibilityHeader = mRecognitionResultTable->horizontalHeaderItem( 7 ) )
@@ -11552,6 +12127,56 @@ void QgsEcoRestorationController::scheduleRecognitionResultTableRefresh()
   } );
 }
 
+QgsVectorLayer *QgsEcoRestorationController::recognitionResultTowerLayer( QgsVectorLayer *resultLayer ) const
+{
+  if ( !resultLayer )
+    return nullptr;
+  QString towerLayerId = resultLayer->customProperty( QStringLiteral( "eco/towerLayerId" ) ).toString().trimmed();
+  if ( towerLayerId.isEmpty() )
+    towerLayerId = resultLayer->customProperty( QStringLiteral( "eco/recognitionTowerLayerId" ) ).toString().trimmed();
+  if ( !towerLayerId.isEmpty() )
+  {
+    if ( QgsVectorLayer *layer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( towerLayerId ) ) )
+      return layer;
+  }
+  return selectedRecognitionTowerLayer();
+}
+
+void QgsEcoRestorationController::saveRecognitionResultTowerBinding( const QString &layerId, qint64 featureId, const QString &number, const QString &towerLayerId, const QString &towerFeatureId )
+{
+  QgsVectorLayer *layer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( layerId ) );
+  if ( !layer || featureId == FID_NULL )
+    return;
+  const int towerIndex = layer->fields().indexFromName( QLatin1String( sRecognitionTowerNumberField ) );
+  const int towerLayerIndex = layer->fields().indexFromName( QLatin1String( sRecognitionTowerLayerField ) );
+  const int towerFeatureIndex = layer->fields().indexFromName( QLatin1String( sRecognitionTowerFeatureField ) );
+  if ( towerIndex < 0 )
+    return;
+  const bool startedHere = !layer->isEditable();
+  if ( startedHere && !layer->startEditing() )
+  {
+    showMessage( tr( "杆塔编号" ), tr( "结果图层无法进入编辑状态，无法保存杆塔编号。" ), true );
+    return;
+  }
+  bool ok = layer->changeAttributeValue( featureId, towerIndex, number.trimmed() );
+  if ( ok && towerLayerIndex >= 0 )
+    ok = layer->changeAttributeValue( featureId, towerLayerIndex, towerLayerId.trimmed() );
+  if ( ok && towerFeatureIndex >= 0 )
+    ok = layer->changeAttributeValue( featureId, towerFeatureIndex, towerFeatureId.trimmed() );
+  if ( startedHere )
+    ok = ok && layer->commitChanges();
+  if ( !ok )
+  {
+    if ( startedHere )
+      layer->rollBack();
+    showMessage( tr( "杆塔编号" ), tr( "杆塔编号保存失败，请检查结果图层写入权限。" ), true );
+    return;
+  }
+  layer->triggerRepaint();
+  QgsProject::instance()->setDirty( true );
+  scheduleRecognitionResultTableRefresh();
+}
+
 void QgsEcoRestorationController::refreshRecognitionResultTable()
 {
   if ( !mRecognitionResultTable || mRecognitionResultLayerId.isEmpty() )
@@ -11560,8 +12185,24 @@ void QgsEcoRestorationController::refreshRecognitionResultTable()
   if ( !resultLayer )
   {
     mRecognitionResultTable->setRowCount( 0 );
+    mRecognitionResultTable->setProperty( "eco/displayedResultLayerId", QVariant() );
     return;
   }
+
+  // Attribute commits, geometry edits and new results all rebuild this view.
+  // Keep the viewport and current feature for the same layer, rather than
+  // letting clear/repopulate jump to the first row. Feature IDs also keep the
+  // visible row stable when records before it are inserted or deleted.
+  const bool preserveView = mRecognitionResultTable->property( "eco/displayedResultLayerId" ).toString() == resultLayer->id();
+  const int verticalPosition = preserveView ? mRecognitionResultTable->verticalScrollBar()->value() : 0;
+  const int horizontalPosition = preserveView ? mRecognitionResultTable->horizontalScrollBar()->value() : 0;
+  const int currentColumn = mRecognitionResultTable->currentColumn();
+  const bool hadSelection = mRecognitionResultTable->selectionModel()->hasSelection();
+  const QTableWidgetItem *currentSequence = preserveView ? mRecognitionResultTable->item( mRecognitionResultTable->currentRow(), 0 ) : nullptr;
+  const QgsFeatureId currentFeatureId = currentSequence ? currentSequence->data( Qt::UserRole + 1 ).toLongLong() : FID_NULL;
+  const QTableWidgetItem *topSequence = preserveView ? mRecognitionResultTable->item( mRecognitionResultTable->rowAt( 0 ), 0 ) : nullptr;
+  const QgsFeatureId topFeatureId = topSequence ? topSequence->data( Qt::UserRole + 1 ).toLongLong() : FID_NULL;
+  const int topOffset = topSequence ? mRecognitionResultTable->visualItemRect( topSequence ).top() : 0;
 
   const QSignalBlocker tableSignals( mRecognitionResultTable );
   const bool segmentationResult = !resultLayer->customProperty( QStringLiteral( "eco/segmentationIssue" ) ).toString().trimmed().isEmpty();
@@ -11573,14 +12214,25 @@ void QgsEcoRestorationController::refreshRecognitionResultTable()
   const int confidenceIndex = resultLayer->fields().indexFromName( QStringLiteral( "confidence" ) );
   const int sourceIndex = resultLayer->fields().indexFromName( QStringLiteral( "source" ) );
   const int visibilityIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionVisibilityField ) );
+  const int towerLayerIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerLayerField ) );
+  const int towerFeatureIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerFeatureField ) );
   const bool manual = resultLayer->customProperty( QStringLiteral( "eco/recognitionMode" ) ).toString() == QLatin1String( "manual" );
   const int filter = mRecognitionResultFilter ? mRecognitionResultFilter->currentData().toInt() : 0;
 
   mRecognitionResultTable->setSortingEnabled( false );
   mRecognitionResultTable->setRowCount( 0 );
+  int restoredCurrentRow = -1;
+  int restoredTopRow = -1;
   int row = 0;
   QgsFeature feature;
-  QgsFeatureIterator iterator = resultLayer->getFeatures();
+  QgsFeatureRequest orderedRequest;
+  // object_id is assigned monotonically when results are created; descending
+  // order keeps the newest result at the top while preserving stable FID order
+  // for legacy layers without object_id values.
+  if ( objectIdIndex >= 0 )
+    orderedRequest.addOrderBy( QStringLiteral( "object_id" ), false );
+  orderedRequest.addOrderBy( QStringLiteral( "$id" ), false );
+  QgsFeatureIterator iterator = resultLayer->getFeatures( orderedRequest );
   while ( iterator.nextFeature( feature ) )
   {
     const QString storedStatus = statusIndex >= 0 ? feature.attribute( statusIndex ).toString().trimmed() : QString();
@@ -11589,6 +12241,10 @@ void QgsEcoRestorationController::refreshRecognitionResultTable()
                                && !feature.geometry().isNull() && !feature.geometry().isEmpty() );
     if ( ( filter == 1 && !detected ) || ( filter == 2 && detected ) )
       continue;
+    if ( currentFeatureId != FID_NULL && feature.id() == currentFeatureId )
+      restoredCurrentRow = row;
+    if ( topFeatureId != FID_NULL && feature.id() == topFeatureId )
+      restoredTopRow = row;
 
     QString resultLabel = segmentationResult && objectIdIndex >= 0
                             ? feature.attribute( objectIdIndex ).toString().trimmed()
@@ -11612,6 +12268,8 @@ void QgsEcoRestorationController::refreshRecognitionResultTable()
       towerItem->setFlags( towerItem->flags() & ~Qt::ItemIsEditable );
     else
       towerItem->setFlags( towerItem->flags() | Qt::ItemIsEditable );
+    towerItem->setData( Qt::UserRole + 3, towerLayerIndex >= 0 ? feature.attribute( towerLayerIndex ).toString() : QString() );
+    towerItem->setData( Qt::UserRole + 4, towerFeatureIndex >= 0 ? feature.attribute( towerFeatureIndex ).toString() : QString() );
     mRecognitionResultTable->setItem( row, 1, towerItem );
     QTableWidgetItem *statusItem = new QTableWidgetItem( status );
     statusItem->setForeground( detected ? QColor( "#ff6b6b" ) : QColor( "#94a3b8" ) );
@@ -11660,13 +12318,38 @@ void QgsEcoRestorationController::refreshRecognitionResultTable()
     connect( visibility, &QCheckBox::toggled, this, [this, row]( bool value ) { setRecognitionResultVisibilityForRow( row, value ); } );
     mRecognitionResultTable->setCellWidget( row, 7, visibilityCell );
     if ( segmentationResult )
-      mRecognitionResultTable->setItem( row, 8, new QTableWidgetItem( towerNoIndex >= 0 ? feature.attribute( towerNoIndex ).toString() : QString() ) );
+    {
+      QTableWidgetItem *segTowerItem = new QTableWidgetItem( towerNoIndex >= 0 ? feature.attribute( towerNoIndex ).toString() : QString() );
+      segTowerItem->setFlags( segTowerItem->flags() | Qt::ItemIsEditable );
+      segTowerItem->setData( Qt::UserRole + 3, towerLayerIndex >= 0 ? feature.attribute( towerLayerIndex ).toString() : QString() );
+      segTowerItem->setData( Qt::UserRole + 4, towerFeatureIndex >= 0 ? feature.attribute( towerFeatureIndex ).toString() : QString() );
+      mRecognitionResultTable->setItem( row, 8, segTowerItem );
+    }
     ++row;
   }
   mRecognitionResultTable->resizeColumnsToContents();
   mRecognitionResultTable->setColumnWidth( 6, 160 );
   mRecognitionResultTable->setColumnWidth( 7, 120 );
   mRecognitionResultTable->setColumnWidth( 8, 120 );
+  mRecognitionResultTable->setProperty( "eco/displayedResultLayerId", resultLayer->id() );
+  if ( restoredCurrentRow >= 0 )
+  {
+    mRecognitionResultTable->setCurrentCell( restoredCurrentRow, std::max( 0, currentColumn ),
+                                            hadSelection ? QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows
+                                                         : QItemSelectionModel::NoUpdate );
+  }
+  // Flush the row layout before restoring scrollbars; otherwise the deferred
+  // layout can reset their ranges after this method returns.
+  mRecognitionResultTable->doItemsLayout();
+  if ( restoredTopRow >= 0 )
+  {
+    mRecognitionResultTable->scrollToItem( mRecognitionResultTable->item( restoredTopRow, 0 ), QAbstractItemView::PositionAtTop );
+    if ( mRecognitionResultTable->verticalScrollMode() == QAbstractItemView::ScrollPerPixel )
+      mRecognitionResultTable->verticalScrollBar()->setValue( mRecognitionResultTable->verticalScrollBar()->value() - topOffset );
+  }
+  else
+    mRecognitionResultTable->verticalScrollBar()->setValue( verticalPosition );
+  mRecognitionResultTable->horizontalScrollBar()->setValue( horizontalPosition );
   Q_UNUSED( manual );
 }
 void QgsEcoRestorationController::showRecognitionResultContextMenu( const QPoint &pos )
@@ -11719,16 +12402,44 @@ bool QgsEcoRestorationController::focusRecognitionResultRow( int row, double sca
     return false;
   QgsFeature feature;
   QgsFeatureIterator iterator = resultLayer->getFeatures( QgsFeatureRequest( static_cast<QgsFeatureId>( item->data( Qt::UserRole + 1 ).toLongLong() ) ) );
-  if ( !iterator.nextFeature( feature ) || feature.geometry().isNull() || feature.geometry().isEmpty() )
+  if ( !iterator.nextFeature( feature ) )
+  {
+    showMessage( tr( "定位" ), tr( "结果记录已不存在，无法定位。" ), true );
     return false;
-  QgsPointXY point = feature.geometry().centroid().asPoint();
+  }
+  QgsPointXY point;
+  QgsCoordinateReferenceSystem sourceCrs = resultLayer->crs();
+  if ( !feature.geometry().isNull() && !feature.geometry().isEmpty() )
+  {
+    point = feature.geometry().centroid().asPoint();
+    if ( point.isEmpty() )
+      point = feature.geometry().pointOnSurface().asPoint();
+  }
+  else
+  {
+    const int layerIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerLayerField ) );
+    const int featureIndex = resultLayer->fields().indexFromName( QLatin1String( sRecognitionTowerFeatureField ) );
+    const QString towerLayerId = layerIndex >= 0 ? feature.attribute( layerIndex ).toString().trimmed() : QString();
+    const QgsFeatureId towerFeatureId = featureIndex >= 0 ? feature.attribute( featureIndex ).toLongLong() : FID_NULL;
+    QgsVectorLayer *towerLayer = towerLayerId.isEmpty() ? nullptr : qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( towerLayerId ) );
+    QgsFeature towerFeature;
+    if ( !towerLayer || towerFeatureId == FID_NULL || !towerLayer->getFeature( towerFeatureId ).isValid() )
+    {
+      showMessage( tr( "定位" ), tr( "该记录没有可定位的杆塔坐标。请从下拉列表选择杆塔编号；手动输入的编号无法自动定位。" ), true );
+      return false;
+    }
+    towerFeature = towerLayer->getFeature( towerFeatureId );
+    point = featurePoint( towerFeature.geometry() );
+    sourceCrs = towerLayer->crs();
+  }
   if ( point.isEmpty() )
-    point = feature.geometry().pointOnSurface().asPoint();
-  if ( point.isEmpty() )
+  {
+    showMessage( tr( "定位" ), tr( "无法获取该记录的有效空间位置。" ), true );
     return false;
+  }
   try
   {
-    QgsCoordinateTransform transform( resultLayer->crs(), mApp->mapCanvas()->mapSettings().destinationCrs(), QgsProject::instance()->transformContext() );
+    QgsCoordinateTransform transform( sourceCrs, mApp->mapCanvas()->mapSettings().destinationCrs(), QgsProject::instance()->transformContext() );
     mApp->mapCanvas()->setCenter( transform.transform( point ) );
     mApp->mapCanvas()->zoomScale( scale );
     mApp->mapCanvas()->refresh();
@@ -11773,10 +12484,13 @@ void QgsEcoRestorationController::editRecognitionResultForRow( int row )
     canvas->setCurrentLayer( resultLayer );
     canvas->refresh();
   }
-  mApp->actionVertexToolActiveLayer()->trigger();
   mRecognitionEditingTowerLabel = mRecognitionResultTable->item( row, 1 ) ? mRecognitionResultTable->item( row, 1 )->text() : QString();
   mRecognitionEditingLayerId = resultLayer->id();
   mRecognitionEditingFeatureId = static_cast<qint64>( featureId );
+  mApp->actionVertexToolActiveLayer()->trigger();
+  mRecognitionEditingMapTool = mApp->mapCanvas() ? mApp->mapCanvas()->mapTool() : nullptr;
+  if ( mApp->mapCanvas() )
+    mApp->mapCanvas()->setFocus();
   if ( mRecognitionResultFilter && mRecognitionResultFilter->currentIndex() != 0 )
     mRecognitionResultFilter->setCurrentIndex( 0 );
   refreshRecognitionResultTable();
@@ -11823,6 +12537,7 @@ void QgsEcoRestorationController::addRecognitionResultForRow( int row )
     mRecognitionResultFilter->setCurrentIndex( 0 );
   refreshRecognitionResultTable();
   mApp->actionAddFeature()->trigger();
+  mRecognitionEditingMapTool = mApp->mapCanvas() ? mApp->mapCanvas()->mapTool() : nullptr;
 }
 void QgsEcoRestorationController::finishRecognitionResultForFeature( const QString &layerId, qint64 featureId )
 {
@@ -11985,6 +12700,27 @@ void QgsEcoRestorationController::finishRecognitionEditing( QgsVectorLayer *laye
     vertexEditor->hide();
 }
 
+bool QgsEcoRestorationController::resumeRecognitionEditingMapTool()
+{
+  if ( !mApp || !mApp->mapCanvas() || !mRecognitionEditingMapTool || mProjectTransitionInProgress )
+    return false;
+
+  QgsVectorLayer *layer = qobject_cast<QgsVectorLayer *>( QgsProject::instance()->mapLayer( mRecognitionEditingLayerId ) );
+  if ( !layer || !layer->isEditable() || !layer->getFeature( static_cast<QgsFeatureId>( mRecognitionEditingFeatureId ) ).isValid() )
+  {
+    mRecognitionEditingMapTool = nullptr;
+    return false;
+  }
+
+  mApp->setActiveLayer( layer );
+  if ( QgsLayerTreeView *view = mApp->layerTreeView() )
+    view->setCurrentLayer( layer );
+  mApp->mapCanvas()->setCurrentLayer( layer );
+  mApp->mapCanvas()->setMapTool( mRecognitionEditingMapTool );
+  mApp->mapCanvas()->setFocus();
+  return true;
+}
+
 void QgsEcoRestorationController::normalizeRecognitionResultLayerAfterEdit( QgsVectorLayer *layer )
 {
   if ( !layer || !mApp || !isRecognitionResultTableLayer( layer ) )
@@ -11999,6 +12735,7 @@ void QgsEcoRestorationController::normalizeRecognitionResultLayerAfterEdit( QgsV
   const bool trackedEditingLayer = mRecognitionEditingLayerId == layer->id();
   if ( trackedEditingLayer )
   {
+    mRecognitionEditingMapTool = nullptr;
     mRecognitionEditingTowerLabel.clear();
     mRecognitionEditingLayerId.clear();
     mRecognitionEditingFeatureId = -1;
@@ -12063,6 +12800,97 @@ void QgsEcoRestorationController::toggleTowerDisplayMode( QgsVectorLayer *layer 
   QgsProject::instance()->setDirty( true );
   if ( mApp && mApp->mapCanvas() )
     mApp->mapCanvas()->refresh();
+}
+
+QgsRasterLayer *QgsEcoRestorationController::rasterForExtentRecognition( const QgsRectangle &canvasExtent, QgsRectangle *rasterExtent ) const
+{
+  if ( !mApp || !mApp->mapCanvas() || !rasterExtent || canvasExtent.isEmpty() || !canvasExtent.isFinite() )
+    return nullptr;
+
+  QgsProject *project = QgsProject::instance();
+  const QList<QgsMapLayer *> visibleLayers = mApp->mapCanvas()->layers();
+  QList<QgsRasterLayer *> candidates;
+  const auto addCandidate = [&]( QgsMapLayer *layer ) {
+    QgsRasterLayer *candidate = qobject_cast<QgsRasterLayer *>( layer );
+    if ( !candidate || !candidate->isValid() || !candidate->dataProvider() || !candidate->crs().isValid()
+         || candidates.contains( candidate ) || !visibleLayers.contains( candidate ) )
+      return;
+    QgsLayerTreeLayer *node = project->layerTreeRoot()->findLayer( candidate->id() );
+    if ( !node || !node->isVisible() )
+      return;
+    const QString phaseId = layerPhaseIdForLayer( candidate );
+    if ( phaseId != mRecognitionExtentPhaseId )
+      return;
+    candidates.append( candidate );
+  };
+
+  // The selected tree image wins when it covers the rectangle. Otherwise use
+  // the starting image, then the other visible tiles in the same phase.
+  addCandidate( mApp->activeLayer() );
+  addCandidate( project->mapLayer( mRecognitionExtentRasterLayerId ) );
+  for ( QgsMapLayer *layer : visibleLayers )
+    addCandidate( layer );
+
+  for ( QgsRasterLayer *candidate : std::as_const( candidates ) )
+  {
+    try
+    {
+      const QgsCoordinateTransform transform( mApp->mapCanvas()->mapSettings().destinationCrs(), candidate->crs(), project->transformContext() );
+      const QgsRectangle transformed = transform.transformBoundingBox( canvasExtent );
+      const QgsRectangle intersection = transformed.intersect( candidate->extent() );
+      if ( transformed.isFinite() && !intersection.isEmpty() && intersection.isFinite() )
+      {
+        *rasterExtent = transformed;
+        return candidate;
+      }
+    }
+    catch ( const QgsCsException & )
+    {
+      ecoImportTrace( QStringLiteral( "manual extent transform failed raster=%1 canvasCrs=%2 rasterCrs=%3" )
+                        .arg( candidate->id(), mApp->mapCanvas()->mapSettings().destinationCrs().authid(), candidate->crs().authid() ) );
+    }
+  }
+  return nullptr;
+}
+
+QgsRasterLayer *QgsEcoRestorationController::smartSegmentationRasterLayer() const
+{
+  if ( !mApp || !mApp->mapCanvas() )
+    return nullptr;
+  QgsProject *project = QgsProject::instance();
+  const QString requiredPhase = mSmartSegmentationSessionPhaseId.isEmpty() ? currentPhaseId() : mSmartSegmentationSessionPhaseId;
+  const QList<QgsMapLayer *> visibleCanvasLayers = mApp->mapCanvas()->layers();
+  auto valid = [&]( QgsRasterLayer *layer ) {
+    if ( !layer || !layer->isValid() || !layer->dataProvider() || !layer->crs().isValid() )
+      return false;
+    QgsLayerTreeLayer *node = project->layerTreeRoot()->findLayer( layer->id() );
+    if ( !node || !node->isVisible() || !visibleCanvasLayers.contains( layer ) )
+      return false;
+    const QString phase = layerPhaseIdForLayer( layer );
+    return requiredPhase.isEmpty() || phase.isEmpty() || phase == requiredPhase;
+  };
+  if ( mSmartSegmentationRasterPinned && !mSmartSegmentationSessionRasterLayerId.isEmpty() )
+  {
+    QgsRasterLayer *pinned = qobject_cast<QgsRasterLayer *>( project->mapLayer( mSmartSegmentationSessionRasterLayerId ) );
+    if ( valid( pinned ) )
+      return pinned;
+    return nullptr;
+  }
+  if ( valid( qobject_cast<QgsRasterLayer *>( mApp->activeLayer() ) ) )
+    return qobject_cast<QgsRasterLayer *>( mApp->activeLayer() );
+  if ( mRecognitionRasterCombo )
+  {
+    QgsRasterLayer *selected = qobject_cast<QgsRasterLayer *>( project->mapLayer( mRecognitionRasterCombo->currentData().toString() ) );
+    if ( valid( selected ) )
+      return selected;
+  }
+  for ( QgsMapLayer *candidate : visibleCanvasLayers )
+  {
+    QgsRasterLayer *raster = qobject_cast<QgsRasterLayer *>( candidate );
+    if ( valid( raster ) )
+      return raster;
+  }
+  return nullptr;
 }
 
 QgsRasterLayer *QgsEcoRestorationController::selectedRecognitionRasterLayer() const

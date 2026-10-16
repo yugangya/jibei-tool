@@ -14,6 +14,8 @@
 #include <QImage>
 #include <QString>
 #include <QVector>
+#include <QMutex>
+#include <QMutexLocker>
 
 #include <algorithm>
 #include <cstdint>
@@ -262,6 +264,12 @@ namespace
     return cache;
   }
 
+  QMutex &sam2SessionMutex()
+  {
+    static QMutex mutex;
+    return mutex;
+  }
+
   QString loadSam2Sessions( const QString &encoderPath, const QString &decoderPath )
   {
     Sam2SessionCache &cache = sam2Sessions();
@@ -370,6 +378,10 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
   result.error = QStringLiteral( "SAM2 is not enabled in this build." );
   return result;
 #else
+  // The encoder/decoder session cache is shared by the map and photo
+  // workflows. Serialize access so a background photo request cannot race a
+  // map prompt while sessions or their output buffers are being used.
+  QMutexLocker sessionLocker( &sam2SessionMutex() );
   const bool useImageInput = !parameters.inputImage.isNull();
   if ( !useImageInput && ( !rasterLayer || !rasterLayer->isValid() ) )
   {
@@ -791,14 +803,12 @@ QgsEcoSam2OnnxInference::Result QgsEcoSam2OnnxInference::run( QgsRasterLayer *ra
   }
   catch ( const Ort::Exception &exception )
   {
-    Q_UNUSED( exception )
-    result.error = QStringLiteral( "SAM2 is temporarily unavailable." );
+    result.error = QStringLiteral( "SAM2 推理暂时不可用：%1" ).arg( QString::fromUtf8( exception.what() ) );
     return result;
   }
   catch ( const std::exception &exception )
   {
-    Q_UNUSED( exception )
-    result.error = QStringLiteral( "SAM2 is temporarily unavailable." );
+    result.error = QStringLiteral( "SAM2 推理发生异常：%1" ).arg( QString::fromUtf8( exception.what() ) );
     return result;
   }
 #endif

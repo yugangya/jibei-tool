@@ -230,7 +230,7 @@ namespace
     return keep;
   }
 
-  QVector<QgsEcoOnnxDetection> globalNms( QVector<QgsEcoOnnxDetection> detections, double threshold )
+  QVector<QgsEcoOnnxDetection> globalNms( QVector<QgsEcoOnnxDetection> detections, double threshold, bool preserveTargetIdentity = false )
   {
     std::sort( detections.begin(), detections.end(), []( const QgsEcoOnnxDetection &left, const QgsEcoOnnxDetection &right ) { return left.confidence > right.confidence; } );
     QVector<QgsEcoOnnxDetection> keep;
@@ -240,7 +240,9 @@ namespace
       bool suppressed = false;
       for ( const QgsEcoOnnxDetection &kept : std::as_const( keep ) )
       {
-        if ( detection.classId == kept.classId && rectangleIou( bounds, kept.geometry.boundingBox() ) > threshold )
+        if ( detection.classId == kept.classId
+             && ( !preserveTargetIdentity || detection.tileIndex == kept.tileIndex )
+             && rectangleIou( bounds, kept.geometry.boundingBox() ) > threshold )
         {
           suppressed = true;
           break;
@@ -868,7 +870,7 @@ QgsEcoOnnxInference::Result QgsEcoOnnxInference::run( QgsRasterLayer *rasterLaye
         result.processedTiles = tileIndex;
     }
 
-    result.detections = globalNms( std::move( allDetections ), parameters.iouThreshold );
+    result.detections = globalNms( std::move( allDetections ), parameters.iouThreshold, parameters.preserveTargetIdentity );
     result.success = true;
     return result;
   }
